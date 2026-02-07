@@ -1,9 +1,23 @@
 import * as THREE from "https://unpkg.com/three@0.161.0/build/three.module.js";
+import { createTacticalRifleModel } from "./weaponModels.js";
 
 export class PlayerController {
   constructor(camera, getHeightAt, options = {}) {
     this.camera = camera;
     this.getHeightAt = getHeightAt;
+    this.getHeightAtDetailed = options.getHeightAtDetailed || getHeightAt;
+    this.resolveHorizontalCollision =
+      typeof options.resolveHorizontalCollision === "function"
+        ? options.resolveHorizontalCollision
+        : null;
+    this.getCameraTuningForPosition =
+      typeof options.getCameraTuningForPosition === "function"
+        ? options.getCameraTuningForPosition
+        : null;
+    this.constrainCameraPosition =
+      typeof options.constrainCameraPosition === "function"
+        ? options.constrainCameraPosition
+        : null;
     this.options = options;
 
     this.position = new THREE.Vector3(0, 6, 0);
@@ -48,13 +62,47 @@ export class PlayerController {
 
     this.walkCycle = 0;
     this.moveBlend = 0;
+    this.groundStickDistance = 0.35;
+    this.groundDrag = 7;
+    this.elapsed = 0;
+    this.punchState = {
+      active: false,
+      hand: "right",
+      startAt: 0,
+      hitAt: 0,
+      endAt: 0,
+      cooldownUntil: 0,
+    };
 
     const avatar = this._createAvatar(options.scene);
     this.avatarRoot = avatar.root;
     this.avatarParts = avatar.parts;
-    this.avatarRoot.position.copy(this.position);
+    this.avatarRoot.position.copy(this.position).add(new THREE.Vector3(0, -this.height, 0));
+    this.weaponRig = this._createWeaponRig();
 
     this._setupInput();
+  }
+
+  _createWeaponRig() {
+    const gun = createTacticalRifleModel({
+      color: 0x2f343f,
+      accent: 0x10151e,
+      scale: 0.78,
+    });
+
+    const mount = new THREE.Group();
+    mount.position.set(0.38, 1.36, 0.16);
+    mount.rotation.set(-0.14, -0.02, -0.15);
+    mount.add(gun.root);
+
+    gun.root.rotation.set(0.05, 0, 0);
+    this.avatarRoot.add(mount);
+
+    return {
+      mount,
+      root: gun.root,
+      muzzle: gun.muzzle,
+    };
   }
 
   _createAvatar(scene) {
@@ -216,7 +264,28 @@ export class PlayerController {
   setPosition(x, y, z) {
     this.position.set(x, y, z);
     this.velocity.set(0, 0, 0);
-    this.avatarRoot.position.copy(this.position);
+    this.avatarRoot.position.copy(this.position).add(new THREE.Vector3(0, -this.height, 0));
+  }
+
+  tryStartPunch(time) {
+    if (time < this.punchState.cooldownUntil) return null;
+    this.punchState.active = true;
+    this.punchState.hand = this.punchState.hand === "right" ? "left" : "right";
+    this.punchState.startAt = time;
+    this.punchState.hitAt = time + 0.12;
+    this.punchState.endAt = time + 0.42;
+    this.punchState.cooldownUntil = time + 0.58;
+
+    return {
+      hitAt: this.punchState.hitAt,
+      endAt: this.punchState.endAt,
+    };
+  }
+
+  getPunchQuery(targetOrigin = new THREE.Vector3(), targetDirection = new THREE.Vector3()) {
+    targetOrigin.copy(this.position).add(new THREE.Vector3(0, 1.3, 0));
+    targetDirection.set(Math.sin(this.yaw), 0, Math.cos(this.yaw)).normalize();
+    return { origin: targetOrigin, direction: targetDirection };
   }
 
   getPositionArray() {
@@ -238,6 +307,10 @@ export class PlayerController {
   }
 
   getMuzzleOrigin(target = new THREE.Vector3()) {
+    if (this.weaponRig && this.weaponRig.muzzle) {
+      return this.weaponRig.muzzle.getWorldPosition(target);
+    }
+
     const forward = this.getAimDirection(new THREE.Vector3());
     const right = new THREE.Vector3(forward.z, 0, -forward.x).normalize();
     return target
@@ -248,7 +321,7 @@ export class PlayerController {
   }
 
   _updateVisual(dt, hasMoveInput) {
-    this.avatarRoot.position.copy(this.position);
+    this.avatarRoot.position.copy(this.position).add(new THREE.Vector3(0, -this.height, 0));
     if (hasMoveInput) {
       const targetYaw = Math.atan2(this.moveDir.x, this.moveDir.z);
       let delta = targetYaw - this.visualYaw;
@@ -269,10 +342,25 @@ export class PlayerController {
     const kneeBendL = Math.max(0, Math.sin(this.walkCycle + Math.PI * 0.5)) * 0.4 * this.moveBlend;
     const kneeBendR = Math.max(0, Math.sin(this.walkCycle + Math.PI * 1.5)) * 0.4 * this.moveBlend;
 
-    this.avatarParts.shoulderL.rotation.x = swing;
-    this.avatarParts.shoulderR.rotation.x = -swing;
-    this.avatarParts.forearmL.rotation.x = -Math.max(0, swing) * 0.45;
-    this.avatarParts.forearmR.rotation.x = Math.max(0, swing) * 0.45;
+    const armSwing = swing * 0.22;
+    const aimDownSights = this.isAiming ? 1 : 0;
+    const holdBlend = 0.65 + aimDownSights * 0.35;
+    const punch = this.punchState;
+    const punchT = punch.active
+      ? Math.max(0, Math.min(1, (this.elapsed - punch.startAt) / Math.max(0.001, punch.endAt - punch.startAt)))
+      : 0;
+    const punchWave = punch.active ? Math.sin(punchT * Math.PI) : 0;
+    const isRightPunch = punch.hand === "right";
+
+    this.avatarParts.shoulderR.rotation.x = -0.92 * holdBlend + armSwing + (isRightPunch ? punchWave * 0.95 : 0);
+    this.avatarParts.shoulderR.rotation.y = -0.12;
+    this.avatarParts.shoulderR.rotation.z = -0.08;
+    this.avatarParts.forearmR.rotation.x = -0.58 * holdBlend + armSwing * 0.5 + (isRightPunch ? punchWave * 0.45 : 0);
+
+    this.avatarParts.shoulderL.rotation.x = -0.76 * holdBlend - armSwing + (!isRightPunch ? punchWave * 0.95 : 0);
+    this.avatarParts.shoulderL.rotation.y = 0.26;
+    this.avatarParts.shoulderL.rotation.z = 0.15;
+    this.avatarParts.forearmL.rotation.x = -0.94 * holdBlend - armSwing * 0.35 + (!isRightPunch ? punchWave * 0.45 : 0);
 
     this.avatarParts.hipL.rotation.x = -swing;
     this.avatarParts.hipR.rotation.x = swing;
@@ -280,12 +368,27 @@ export class PlayerController {
     this.avatarParts.shinR.rotation.x = kneeBendR;
 
     this.avatarParts.torso.position.y = 1.2 + Math.sin(this.walkCycle * 2) * 0.03 * this.moveBlend;
+
+    if (this.weaponRig) {
+      const aimPitchOffset = this.pitch * 0.25;
+      const sprintOffset = hasMoveInput && this.keys.has("ShiftLeft") ? 0.08 : 0;
+      this.weaponRig.mount.rotation.x = -0.14 + aimPitchOffset + sprintOffset;
+      this.weaponRig.mount.rotation.z = -0.15 + Math.sin(this.walkCycle) * 0.02 * this.moveBlend;
+      this.weaponRig.mount.position.y = 1.36 + Math.sin(this.walkCycle * 2) * 0.015 * this.moveBlend;
+    }
   }
 
   _updateCamera(dt) {
     const cfg = this.cameraConfig;
-    const cameraDistance = this.isAiming ? cfg.aimDistance : cfg.distance;
-    const shoulder = cfg.shoulderOffset * this.shoulderSide;
+    const tuning = this.getCameraTuningForPosition
+      ? this.getCameraTuningForPosition(this.position)
+      : null;
+    const distanceMul = tuning?.distanceMultiplier ?? 1;
+    const shoulderMul = tuning?.shoulderMultiplier ?? 1;
+    const collisionPadding = tuning?.collisionPadding ?? cfg.collisionPadding;
+
+    const cameraDistance = (this.isAiming ? cfg.aimDistance : cfg.distance) * distanceMul;
+    const shoulder = cfg.shoulderOffset * this.shoulderSide * shoulderMul;
 
     const up = new THREE.Vector3(0, 1, 0);
     const forward = new THREE.Vector3(
@@ -312,9 +415,13 @@ export class PlayerController {
       this.cameraRay.far = rayLen;
       const hits = this.cameraRay.intersectObjects(this.cameraCollisionMeshes, false);
       if (hits.length > 0) {
-        const safeDist = Math.max(cfg.minDistance, hits[0].distance - cfg.collisionPadding);
+        const safeDist = Math.max(cfg.minDistance, hits[0].distance - collisionPadding);
         desiredCameraPos.copy(pivot).add(rayDir.multiplyScalar(safeDist));
       }
+    }
+
+    if (this.constrainCameraPosition) {
+      this.constrainCameraPosition(desiredCameraPos, pivot, this.position);
     }
 
     const lerpSpeed = this.isAiming ? cfg.aimPositionLerp : cfg.positionLerp;
@@ -323,6 +430,7 @@ export class PlayerController {
   }
 
   update(dt) {
+    this.elapsed += dt;
     let landed = false;
     let fallSpeed = 0;
 
@@ -349,6 +457,11 @@ export class PlayerController {
     const accel = this.onGround ? 12 : 4;
     this.velocity.x += (targetVX - this.velocity.x) * Math.min(1, accel * dt);
     this.velocity.z += (targetVZ - this.velocity.z) * Math.min(1, accel * dt);
+    if (!hasMoveInput && this.onGround) {
+      const drag = Math.min(1, this.groundDrag * dt);
+      this.velocity.x *= 1 - drag;
+      this.velocity.z *= 1 - drag;
+    }
 
     const jumpDown = this.keys.has("Space");
     const jumpPressed = jumpDown && !this.prevJumpDown;
@@ -366,8 +479,19 @@ export class PlayerController {
     this.velocity.y -= this.gravity * dt;
     this.position.addScaledVector(this.velocity, dt);
 
-    const groundY = this.getHeightAt(this.position.x, this.position.z) + this.height;
+    if (this.resolveHorizontalCollision) {
+      this.resolveHorizontalCollision(
+        this.position,
+        0.42,
+        this.position.y - this.height,
+        this.position.y + 0.25
+      );
+    }
+
+    const groundY = this.getHeightAtDetailed(this.position.x, this.position.z, this.position.y - this.height) + this.height;
     const preClampYVel = this.velocity.y;
+    const aboveGround = this.position.y - groundY;
+
     if (this.position.y <= groundY) {
       if (!this.onGround) {
         landed = true;
@@ -376,6 +500,12 @@ export class PlayerController {
       this.position.y = groundY;
       this.velocity.y = 0;
       this.onGround = true;
+    } else if (preClampYVel <= 0 && aboveGround <= this.groundStickDistance) {
+      this.position.y = groundY;
+      this.velocity.y = 0;
+      this.onGround = true;
+    } else {
+      this.onGround = false;
     }
 
     const maxWorld = 107;
@@ -384,6 +514,10 @@ export class PlayerController {
 
     this._updateVisual(dt, hasMoveInput);
     this._updateCamera(dt);
+
+    if (this.punchState.active && this.elapsed >= this.punchState.endAt) {
+      this.punchState.active = false;
+    }
 
     return {
       landed,

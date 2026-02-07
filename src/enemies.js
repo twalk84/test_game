@@ -1,4 +1,5 @@
 import * as THREE from "https://unpkg.com/three@0.161.0/build/three.module.js";
+import { createTacticalRifleModel } from "./weaponModels.js";
 
 const ENEMY_TYPES = {
   bruiser: {
@@ -75,9 +76,14 @@ function numberOr(value, fallback) {
 }
 
 export class EnemySystem {
-  constructor(scene, getHeightAt, worldSize = 220) {
+  constructor(scene, getHeightAt, worldSize = 220, options = {}) {
     this.scene = scene;
     this.getHeightAt = getHeightAt;
+    this.getHeightAtDetailed = options.getHeightAtDetailed || getHeightAt;
+    this.resolveHorizontalCollision =
+      typeof options.resolveHorizontalCollision === "function"
+        ? options.resolveHorizontalCollision
+        : null;
     this.worldSize = worldSize;
     this.maxWorld = worldSize * 0.5 - 4;
     this.enemies = [];
@@ -92,6 +98,13 @@ export class EnemySystem {
       wasNight: false,
       dawnResetPending: false,
     };
+  }
+
+  _startEnemyPunch(enemy, elapsed) {
+    enemy.punchActive = true;
+    enemy.punchHitDone = false;
+    enemy.punchHitAt = elapsed + 0.18;
+    enemy.punchEndAt = elapsed + 0.45;
   }
 
   _createHumanoidEnemyModel(cfg) {
@@ -214,10 +227,32 @@ export class EnemySystem {
     });
   }
 
+  _attachWeaponToEnemy(enemy) {
+    if (enemy.type !== "shooter" && enemy.type !== "sniper") return;
+
+    const isSniper = enemy.type === "sniper";
+    const weapon = createTacticalRifleModel({
+      color: isSniper ? 0x2f2946 : 0x2a313d,
+      accent: isSniper ? 0x130f1f : 0x121822,
+      scale: isSniper ? 0.7 : 0.64,
+    });
+
+    const mount = new THREE.Group();
+    mount.position.set(0.3, 1.24, 0.16);
+    mount.rotation.set(-0.16, -0.02, -0.1);
+    mount.add(weapon.root);
+
+    weapon.root.rotation.set(0.08, 0, 0);
+    enemy.mesh.add(mount);
+
+    enemy.weaponMount = mount;
+    enemy.weaponMuzzle = weapon.muzzle;
+  }
+
   _randomSpawnPosition() {
     const x = (Math.random() - 0.5) * (this.worldSize - 24);
     const z = (Math.random() - 0.5) * (this.worldSize - 24);
-    const y = this.getHeightAt(x, z);
+    const y = this.getHeightAtDetailed(x, z, this.getHeightAt(x, z));
     return new THREE.Vector3(x, y, z);
   }
 
@@ -273,9 +308,14 @@ export class EnemySystem {
         walkCycle: Math.random() * Math.PI * 2,
         moveBlend: 0,
         movedThisFrame: false,
+        punchActive: false,
+        punchHitDone: false,
+        punchHitAt: 0,
+        punchEndAt: 0,
       };
 
       this.enemies.push(enemy);
+      this._attachWeaponToEnemy(enemy);
       this._registerEnemyMeshIds(enemy);
       this.scene.add(mesh);
     }
@@ -327,6 +367,29 @@ export class EnemySystem {
     return this._applyDamage(enemy, damage, time);
   }
 
+  tryHitFromMelee(origin, direction, maxDistance, damage, time, coneDot = 0.45) {
+    const dir = direction.clone().setY(0).normalize();
+    let closest = null;
+    let closestDist = Infinity;
+
+    for (const enemy of this.enemies) {
+      if (!enemy.alive) continue;
+      const toEnemy = enemy.mesh.position.clone().sub(origin);
+      toEnemy.y = 0;
+      const dist = toEnemy.length();
+      if (dist > maxDistance || dist < 0.001) continue;
+      const dot = toEnemy.normalize().dot(dir);
+      if (dot < coneDot) continue;
+      if (dist < closestDist) {
+        closest = enemy;
+        closestDist = dist;
+      }
+    }
+
+    if (!closest) return { hit: false, killed: false, score: 0, xp: 0, type: null };
+    return this._applyDamage(closest, damage, time);
+  }
+
   _updateEnemyVisual(enemy, time) {
     const intensity = time < enemy.hitFlashUntil ? 1.45 : 1;
     for (const mat of enemy.visualMaterials || []) {
@@ -346,10 +409,30 @@ export class EnemySystem {
     const kneeBendL = Math.max(0, Math.sin(enemy.walkCycle + Math.PI * 0.5)) * 0.38 * enemy.moveBlend;
     const kneeBendR = Math.max(0, Math.sin(enemy.walkCycle + Math.PI * 1.5)) * 0.38 * enemy.moveBlend;
 
-    enemy.visualParts.shoulderL.rotation.x = swing;
-    enemy.visualParts.shoulderR.rotation.x = -swing;
-    enemy.visualParts.forearmL.rotation.x = -Math.max(0, swing) * 0.42;
-    enemy.visualParts.forearmR.rotation.x = Math.max(0, swing) * 0.42;
+    const isRanged = enemy.type === "shooter" || enemy.type === "sniper";
+    const armSwing = swing * (isRanged ? 0.2 : 1);
+    const punchT = enemy.punchActive
+      ? clamp((enemy.punchHitAt > 0 ? (enemy.punchHitAt - 0.18) : 0), 0, 9999)
+      : 0;
+    const punchBlend = enemy.punchActive ? 1 : 0;
+
+    if (isRanged) {
+      enemy.visualParts.shoulderR.rotation.x = -0.88 + armSwing;
+      enemy.visualParts.shoulderR.rotation.y = -0.1;
+      enemy.visualParts.shoulderR.rotation.z = -0.08;
+      enemy.visualParts.forearmR.rotation.x = -0.52 + armSwing * 0.45;
+
+      enemy.visualParts.shoulderL.rotation.x = -0.7 - armSwing;
+      enemy.visualParts.shoulderL.rotation.y = 0.24;
+      enemy.visualParts.shoulderL.rotation.z = 0.14;
+      enemy.visualParts.forearmL.rotation.x = -0.86 - armSwing * 0.3;
+    } else {
+      const punchWave = punchBlend * 0.95;
+      enemy.visualParts.shoulderL.rotation.x = swing;
+      enemy.visualParts.shoulderR.rotation.x = -swing + punchWave;
+      enemy.visualParts.forearmL.rotation.x = -Math.max(0, swing) * 0.42;
+      enemy.visualParts.forearmR.rotation.x = Math.max(0, swing) * 0.42 + punchWave * 0.55;
+    }
 
     enemy.visualParts.hipL.rotation.x = -swing;
     enemy.visualParts.hipR.rotation.x = swing;
@@ -357,13 +440,33 @@ export class EnemySystem {
     enemy.visualParts.shinR.rotation.x = kneeBendR;
 
     enemy.visualParts.torso.position.y = 1.2 + Math.sin(enemy.walkCycle * 2) * 0.025 * enemy.moveBlend;
+
+    if (enemy.weaponMount) {
+      enemy.weaponMount.rotation.x = -0.16 + Math.sin(enemy.walkCycle) * 0.05 * enemy.moveBlend;
+      enemy.weaponMount.rotation.z = -0.1 + Math.sin(enemy.walkCycle * 2) * 0.015 * enemy.moveBlend;
+      enemy.weaponMount.position.y = 1.24 + Math.sin(enemy.walkCycle * 2) * 0.01 * enemy.moveBlend;
+    }
   }
 
   _moveOnTerrain(enemy, move, dt) {
     enemy.mesh.position.addScaledVector(move, dt);
     enemy.mesh.position.x = clamp(enemy.mesh.position.x, -this.maxWorld, this.maxWorld);
     enemy.mesh.position.z = clamp(enemy.mesh.position.z, -this.maxWorld, this.maxWorld);
-    enemy.mesh.position.y = this.getHeightAt(enemy.mesh.position.x, enemy.mesh.position.z) + 0.05;
+
+    if (this.resolveHorizontalCollision) {
+      this.resolveHorizontalCollision(
+        enemy.mesh.position,
+        0.5,
+        enemy.mesh.position.y,
+        enemy.mesh.position.y + 2.1
+      );
+    }
+
+    enemy.mesh.position.y = this.getHeightAtDetailed(
+      enemy.mesh.position.x,
+      enemy.mesh.position.z,
+      enemy.mesh.position.y
+    ) + 0.05;
     if (move.lengthSq() > 0.0001) {
       enemy.mesh.rotation.y = Math.atan2(move.x, move.z);
     }
@@ -380,7 +483,7 @@ export class EnemySystem {
     if (enemy.type === "bruiser" || enemy.type === "charger") {
       if (dist <= cfg.attackRange && elapsed >= enemy.nextAttackAt) {
         enemy.nextAttackAt = elapsed + cfg.attackCooldown;
-        result.playerDamage += cfg.attackDamage;
+        this._startEnemyPunch(enemy, elapsed);
         enemy.state = "attack";
       }
       return;
@@ -430,7 +533,9 @@ export class EnemySystem {
 
   _spawnProjectile(enemy, playerPos) {
     const cfg = ENEMY_TYPES[enemy.type];
-    const origin = enemy.mesh.position.clone().add(new THREE.Vector3(0, 1.3, 0));
+    const origin = enemy.weaponMuzzle
+      ? enemy.weaponMuzzle.getWorldPosition(new THREE.Vector3())
+      : enemy.mesh.position.clone().add(new THREE.Vector3(0, 1.3, 0));
     const direction = playerPos.clone().sub(origin).normalize();
 
     const mesh = new THREE.Mesh(
@@ -466,7 +571,7 @@ export class EnemySystem {
     }
     if (dist <= cfg.attackRange && elapsed >= enemy.nextAttackAt) {
       enemy.nextAttackAt = elapsed + cfg.attackCooldown;
-      result.playerDamage += cfg.attackDamage;
+      this._startEnemyPunch(enemy, elapsed);
       enemy.state = "attack";
     }
   }
@@ -478,7 +583,7 @@ export class EnemySystem {
     }
     if (dist <= cfg.attackRange && elapsed >= enemy.nextAttackAt) {
       enemy.nextAttackAt = elapsed + cfg.attackCooldown;
-      result.playerDamage += cfg.attackDamage;
+      this._startEnemyPunch(enemy, elapsed);
       enemy.state = "attack";
     }
   }
@@ -556,6 +661,17 @@ export class EnemySystem {
       const toPlayer = playerPos.clone().sub(enemy.mesh.position);
       toPlayer.y = 0;
       const dist = toPlayer.length();
+
+      if (enemy.punchActive) {
+        if (!enemy.punchHitDone && elapsed >= enemy.punchHitAt && dist <= cfg.attackRange + 0.45) {
+          result.playerDamage += cfg.attackDamage;
+          enemy.punchHitDone = true;
+        }
+        if (elapsed >= enemy.punchEndAt) {
+          enemy.punchActive = false;
+          enemy.punchHitDone = false;
+        }
+      }
 
       if (nightRushActive) {
         enemy.isProvoked = true;
@@ -651,7 +767,7 @@ export class EnemySystem {
 
       const x = clamp(numberOr(saved.x, enemy.mesh.position.x), -this.maxWorld, this.maxWorld);
       const z = clamp(numberOr(saved.z, enemy.mesh.position.z), -this.maxWorld, this.maxWorld);
-      const y = numberOr(saved.y, this.getHeightAt(x, z) + 0.05);
+      const y = numberOr(saved.y, this.getHeightAtDetailed(x, z, this.getHeightAt(x, z)) + 0.05);
       enemy.mesh.position.set(x, y, z);
 
       enemy.respawnAt = Math.max(0, numberOr(saved.respawnAt, 0));

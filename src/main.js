@@ -91,6 +91,10 @@ const inventorySystem = new InventorySystem();
 const player = new PlayerController(camera, world.getHeightAt, {
   scene,
   cameraCollisionMeshes: world.cameraCollisionMeshes,
+  getHeightAtDetailed: world.getHeightAtDetailed,
+  resolveHorizontalCollision: world.resolveHorizontalCollision,
+  getCameraTuningForPosition: world.getCameraTuningForPosition,
+  constrainCameraPosition: world.constrainCameraPosition,
   canSprint: (dt, wantsSprintMove) => {
     if (!wantsSprintMove) return false;
     if (gameState.stamina <= 0) return false;
@@ -104,17 +108,26 @@ const player = new PlayerController(camera, world.getHeightAt, {
     return true;
   },
 });
-player.setPosition(0, world.getHeightAt(0, 0) + 1.6, 0);
+player.setPosition(0, world.getHeightAtDetailed(0, 0, world.getHeightAt(0, 0)) + 1.6, 0);
 
 const collectibles = new CollectibleSystem(scene, world.getHeightAt, world.worldSize);
 collectibles.spawn(45);
 
-const enemies = new EnemySystem(scene, world.getHeightAt, world.worldSize);
+const enemies = new EnemySystem(scene, world.getHeightAt, world.worldSize, {
+  getHeightAtDetailed: world.getHeightAtDetailed,
+  resolveHorizontalCollision: world.resolveHorizontalCollision,
+});
 enemies.spawn(12);
 
 const combatState = {
   nextAttackAt: 0,
   nightRushAnnounced: false,
+  punch: {
+    active: false,
+    hitAt: 0,
+    endAt: 0,
+    resolved: false,
+  },
 };
 
 const weaponDefs = {
@@ -178,8 +191,11 @@ const centerRayDirection = new THREE.Vector3();
 const cameraAimTarget = new THREE.Vector3();
 const muzzleOrigin = new THREE.Vector3();
 const previousProjectilePosition = new THREE.Vector3();
+const punchOrigin = new THREE.Vector3();
+const punchDirection = new THREE.Vector3();
 
 const playerProjectiles = [];
+const muzzleFlashes = [];
 
 let audioCtx;
 let masterGain;
@@ -321,6 +337,34 @@ function spawnPlayerProjectile(weapon, origin, direction) {
   });
 }
 
+function spawnMuzzleFlash(origin, color = 0xffddaa, scale = 1) {
+  const flash = new THREE.Mesh(
+    new THREE.SphereGeometry(0.09 * scale, 8, 8),
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.95,
+    })
+  );
+  flash.position.copy(origin);
+  scene.add(flash);
+  muzzleFlashes.push({ mesh: flash, life: 0.06 });
+}
+
+function updateMuzzleFlashes(dt) {
+  for (let i = muzzleFlashes.length - 1; i >= 0; i--) {
+    const flash = muzzleFlashes[i];
+    flash.life -= dt;
+    const alpha = clamp(flash.life / 0.06, 0, 1);
+    flash.mesh.material.opacity = alpha;
+    flash.mesh.scale.setScalar(1 + (1 - alpha) * 0.5);
+    if (flash.life <= 0) {
+      scene.remove(flash.mesh);
+      muzzleFlashes.splice(i, 1);
+    }
+  }
+}
+
 function updatePlayerProjectiles(dt, elapsed) {
   for (let i = playerProjectiles.length - 1; i >= 0; i--) {
     const p = playerProjectiles[i];
@@ -402,7 +446,22 @@ function performAttack(elapsed) {
     spawnPlayerProjectile(weapon, muzzleOrigin, tempAimVector);
   }
 
+  spawnMuzzleFlash(muzzleOrigin, weapon.projectileColor || 0xffddaa, weapon.id === "shotgun" ? 1.35 : 1);
+
   playTone(weapon.toneMiss, 0.05, "triangle", 0.05);
+}
+
+function performPunch(elapsed) {
+  if (gameState.paused) return;
+  const start = player.tryStartPunch(elapsed);
+  if (!start) return;
+
+  combatState.punch.active = true;
+  combatState.punch.hitAt = start.hitAt;
+  combatState.punch.endAt = start.endAt;
+  combatState.punch.resolved = false;
+  setStatus("Punch!");
+  playTone(260, 0.06, "square", 0.06);
 }
 
 function updateWeaponStatus(elapsed) {
@@ -663,6 +722,11 @@ window.addEventListener("keydown", (e) => {
     applyUpgrade(2);
   } else if (e.code === "Digit3") {
     applyUpgrade(3);
+  } else if (e.code === "KeyF") {
+    performPunch(clock.elapsedTime);
+  } else if (e.code === "KeyY") {
+    const doorResult = world.toggleNearestDoor ? world.toggleNearestDoor(player.position) : null;
+    if (doorResult) setStatus(doorResult.message);
   }
 });
 
@@ -723,9 +787,14 @@ function animate() {
   world.updateDayNight(elapsed, sun, hemi);
 
   if (!gameState.paused) {
+    if (world.updateDoors) {
+      world.updateDoors(dt);
+    }
+
     const playerResult = player.update(dt);
 
     updatePlayerProjectiles(dt, elapsed);
+    updateMuzzleFlashes(dt);
 
     if (!playerResult.sprinting) {
       const regen = playerResult.hasMoveInput ? 12 : 22;
@@ -754,6 +823,25 @@ function animate() {
         setStatus(`Hit by projectile! -${Math.round(enemyResult.playerDamage)} HP`);
       }
       playTone(165, 0.09, "square", 0.07);
+    }
+
+    if (combatState.punch.active && !combatState.punch.resolved && elapsed >= combatState.punch.hitAt) {
+      const query = player.getPunchQuery(punchOrigin, punchDirection);
+      const hit = enemies.tryHitFromMelee(query.origin, query.direction, 2.3, 26, elapsed, 0.4);
+      if (hit.hit) {
+        if (hit.killed) {
+          applyKillRewards(hit.score, hit.xp, "Punch", hit.type);
+        } else {
+          setStatus("Punch connected.");
+        }
+        playTone(480, 0.05, "square", 0.08);
+      } else {
+        setStatus("Punch missed.");
+      }
+      combatState.punch.resolved = true;
+    }
+    if (combatState.punch.active && elapsed >= combatState.punch.endAt) {
+      combatState.punch.active = false;
     }
 
     if (enemyResult.nightRushActive && !combatState.nightRushAnnounced) {
@@ -792,10 +880,14 @@ function animate() {
     const missionResult = missionSystem.update(dt);
     applyMissionResult(missionResult);
 
+    if (world.updateCivilians) {
+      world.updateCivilians(dt, elapsed);
+    }
+
     if (gameState.health <= 0) {
       gameState.health = gameState.maxHealth;
       gameState.stamina = gameState.maxStamina;
-      player.setPosition(0, world.getHeightAt(0, 0) + 1.6, 0);
+      player.setPosition(0, world.getHeightAtDetailed(0, 0, world.getHeightAt(0, 0)) + 1.6, 0);
       setStatus("You were downed! Respawned at origin.");
       playTone(120, 0.3, "square", 0.13);
     }
@@ -810,5 +902,5 @@ function animate() {
   requestAnimationFrame(animate);
 }
 
-setStatus("Explore, survive, fight enemies. LMB attack. I inventory, H medkit.");
+setStatus("Explore, survive, fight enemies. LMB attack. Y door, I inventory, H medkit.");
 animate();
