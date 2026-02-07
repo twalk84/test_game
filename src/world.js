@@ -1,4 +1,5 @@
 import * as THREE from "https://unpkg.com/three@0.161.0/build/three.module.js";
+import { CONFIG } from "./config.js";
 
 function terrainHeight(x, z) {
   return (
@@ -9,31 +10,55 @@ function terrainHeight(x, z) {
 }
 
 export function createWorld(scene) {
-  const worldSize = 220;
-  const segments = 110;
+  const worldSize = CONFIG.world.size;
+  const segments = CONFIG.world.segments;
   const cameraCollisionMeshes = [];
   const worldRadius = worldSize * 0.5;
-  const hazardZones = [
-    { x: -38, z: 34, radius: 10, dps: 7 },
-    { x: 45, z: -22, radius: 12, dps: 8 },
-    { x: 6, z: 48, radius: 8, dps: 9 },
-  ];
+  const hazardZones = CONFIG.world.hazardZones;
 
-  scene.fog = new THREE.Fog(0x7aa4d6, 40, 260);
+  scene.fog = new THREE.Fog(CONFIG.world.fog.color, CONFIG.world.fog.near, CONFIG.world.fog.far);
 
+  // --- Terrain with vertex colors ---
   const groundGeo = new THREE.PlaneGeometry(worldSize, worldSize, segments, segments);
   groundGeo.rotateX(-Math.PI / 2);
 
   const pos = groundGeo.attributes.position;
+  const vertexColors = new Float32Array(pos.count * 3);
+
+  const colorLow = new THREE.Color(0x5a4a32);   // brown (mud/low)
+  const colorMid = new THREE.Color(0x3d7f45);   // green (grass)
+  const colorHigh = new THREE.Color(0x7a7a72);  // grey (rocky)
+
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i);
     const z = pos.getZ(i);
-    pos.setY(i, terrainHeight(x, z));
+    const y = terrainHeight(x, z);
+    pos.setY(i, y);
+
+    // Height-based color blend
+    const color = new THREE.Color();
+    if (y < -0.5) {
+      color.lerpColors(colorLow, colorMid, Math.max(0, (y + 2.5) / 2.0));
+    } else if (y < 2.0) {
+      color.lerpColors(colorMid, colorMid, 1);
+      // Slight variation
+      color.offsetHSL(0, 0, (Math.random() - 0.5) * 0.03);
+    } else {
+      const t = Math.min(1, (y - 2.0) / 2.0);
+      color.lerpColors(colorMid, colorHigh, t);
+    }
+
+    const i3 = i * 3;
+    vertexColors[i3] = color.r;
+    vertexColors[i3 + 1] = color.g;
+    vertexColors[i3 + 2] = color.b;
   }
+
+  groundGeo.setAttribute("color", new THREE.BufferAttribute(vertexColors, 3));
   groundGeo.computeVertexNormals();
 
   const groundMat = new THREE.MeshStandardMaterial({
-    color: 0x3d7f45,
+    vertexColors: true,
     roughness: 0.95,
     metalness: 0.03,
   });
@@ -43,7 +68,24 @@ export function createWorld(scene) {
   scene.add(ground);
   cameraCollisionMeshes.push(ground);
 
-  // Decorative props (rocks/trees)
+  // --- Water plane ---
+  const waterGeo = new THREE.PlaneGeometry(worldSize, worldSize, 40, 40);
+  waterGeo.rotateX(-Math.PI / 2);
+  const waterMat = new THREE.MeshStandardMaterial({
+    color: 0x1a5276,
+    transparent: true,
+    opacity: 0.48,
+    roughness: 0.2,
+    metalness: 0.3,
+    side: THREE.DoubleSide,
+  });
+  const water = new THREE.Mesh(waterGeo, waterMat);
+  water.position.y = -1.0;
+  water.receiveShadow = true;
+  scene.add(water);
+  const waterPositions = waterGeo.attributes.position;
+
+  // --- Decorative props (rocks/trees with variety) ---
   const rockGeo = new THREE.DodecahedronGeometry(0.9, 0);
   const rockMat = new THREE.MeshStandardMaterial({ color: 0x777777, roughness: 1 });
 
@@ -53,9 +95,18 @@ export function createWorld(scene) {
   const leafGeoMid = new THREE.ConeGeometry(0.95, 2.0, 10);
   const leafGeoTop = new THREE.ConeGeometry(0.7, 1.7, 10);
   const leafGeoTip = new THREE.ConeGeometry(0.42, 1.15, 10);
-  const leafMat = new THREE.MeshStandardMaterial({ color: 0x2d6e2f, roughness: 0.9 });
+
+  // Store foliage meshes for wind sway animation
+  const foliageMeshes = [];
 
   function createLayeredPineTree(x, z, y) {
+    // Per-tree color variation
+    const hueShift = (Math.random() - 0.5) * 0.06;
+    const leafMat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color().setHSL(0.35 + hueShift, 0.55, 0.28),
+      roughness: 0.9,
+    });
+
     const trunk = new THREE.Mesh(treeTrunkGeo, trunkMat);
     trunk.position.set(x, y + 1.3, z);
     trunk.castShadow = true;
@@ -89,6 +140,14 @@ export function createWorld(scene) {
 
     scene.add(trunk, leafBottom, leafMid, leafTop, leafTip);
     cameraCollisionMeshes.push(trunk, leafBottom, leafMid, leafTop, leafTip);
+
+    // Track foliage for wind sway (use tip and top as they move most)
+    const windPhase = Math.random() * Math.PI * 2;
+    foliageMeshes.push(
+      { mesh: leafTip, baseZ: sway, phase: windPhase, amplitude: 0.035 },
+      { mesh: leafTop, baseZ: sway, phase: windPhase, amplitude: 0.025 },
+      { mesh: leafMid, baseZ: sway, phase: windPhase, amplitude: 0.015 }
+    );
   }
 
   for (let i = 0; i < 210; i++) {
@@ -109,6 +168,7 @@ export function createWorld(scene) {
     }
   }
 
+  // --- Stars ---
   const starCount = 1100;
   const starPositions = new Float32Array(starCount * 3);
   const starMinR = worldRadius + 80;
@@ -119,13 +179,13 @@ export function createWorld(scene) {
     const phi = Math.random() * Math.PI * 0.52;
     const radius = starMinR + Math.random() * (starMaxR - starMinR);
     const sinPhi = Math.sin(phi);
-    const x = Math.cos(theta) * sinPhi * radius;
-    const y = Math.cos(phi) * radius + 22;
-    const z = Math.sin(theta) * sinPhi * radius;
+    const sx = Math.cos(theta) * sinPhi * radius;
+    const sy = Math.cos(phi) * radius + 22;
+    const sz = Math.sin(theta) * sinPhi * radius;
 
-    starPositions[i * 3] = x;
-    starPositions[i * 3 + 1] = y;
-    starPositions[i * 3 + 2] = z;
+    starPositions[i * 3] = sx;
+    starPositions[i * 3 + 1] = sy;
+    starPositions[i * 3 + 2] = sz;
   }
 
   const starGeo = new THREE.BufferGeometry();
@@ -140,6 +200,7 @@ export function createWorld(scene) {
   const stars = new THREE.Points(starGeo, starMat);
   scene.add(stars);
 
+  // --- Sun/Moon meshes ---
   const sunMesh = new THREE.Mesh(
     new THREE.SphereGeometry(3.4, 20, 20),
     new THREE.MeshBasicMaterial({ color: 0xffd46f })
@@ -150,6 +211,7 @@ export function createWorld(scene) {
   );
   scene.add(sunMesh, moonMesh);
 
+  // --- Hazard zone markers ---
   const hazardGeo = new THREE.RingGeometry(6, 6.6, 32);
   hazardGeo.rotateX(-Math.PI / 2);
   const hazardMat = new THREE.MeshBasicMaterial({
@@ -178,14 +240,14 @@ export function createWorld(scene) {
       }
     }
     const y = terrainHeight(x, z);
-    if (y < -1.6) {
-      damage += 6 * dt;
+    if (y < CONFIG.world.lowTerrainThreshold) {
+      damage += CONFIG.world.lowTerrainDps * dt;
     }
     return damage;
   }
 
   function updateDayNight(elapsedTime, sun, hemi) {
-    const cycle = elapsedTime * 0.08;
+    const cycle = elapsedTime * CONFIG.world.dayNightSpeed;
     const sunHeight = Math.sin(cycle);
     const moonHeight = -sunHeight;
     const daylight = Math.max(0, (sunHeight + 1) * 0.5);
@@ -226,6 +288,24 @@ export function createWorld(scene) {
 
     scene.background = skyColor;
     scene.fog.color.copy(scene.background);
+
+    // Water color shifts with time of day
+    waterMat.color.copy(new THREE.Color(0x0a2a3e).lerp(new THREE.Color(0x1a5276), daylight));
+    waterMat.opacity = 0.35 + daylight * 0.15;
+
+    // Gentle water wave animation
+    for (let i = 0; i < waterPositions.count; i++) {
+      const wx = waterPositions.getX(i);
+      const wz = waterPositions.getZ(i);
+      waterPositions.setY(i, Math.sin(elapsedTime * 0.8 + wx * 0.04 + wz * 0.03) * 0.12);
+    }
+    waterPositions.needsUpdate = true;
+
+    // Wind sway on tree foliage
+    const windStrength = Math.sin(elapsedTime * 0.3) * 0.5 + 0.5;
+    for (const f of foliageMeshes) {
+      f.mesh.rotation.z = f.baseZ + Math.sin(elapsedTime * 1.2 + f.phase) * f.amplitude * (0.5 + windStrength);
+    }
   }
 
   return {

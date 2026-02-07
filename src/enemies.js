@@ -90,15 +90,18 @@ export class EnemySystem {
 
     if (enemy.health <= 0) {
       const cfg = ENEMY_TYPES[enemy.type];
-      enemy.state = "dead";
+      // Start death animation instead of instant remove
+      enemy.state = "dying";
+      enemy.deathTimer = 0.3;
       enemy.respawnAt = time + cfg.respawnDelay;
-      this._setEnemyAlive(enemy, false);
       return {
         hit: true,
         killed: true,
         score: cfg.rewardScore,
         xp: cfg.rewardXp,
         type: enemy.type,
+        deathPos: enemy.mesh.position.clone(),
+        deathColor: cfg.color,
       };
     }
 
@@ -177,6 +180,20 @@ export class EnemySystem {
     for (const enemy of this.enemies) {
       const cfg = ENEMY_TYPES[enemy.type];
       this._updateEnemyVisual(enemy, elapsed);
+
+      // Death animation: scale down, then remove
+      if (enemy.state === "dying") {
+        enemy.deathTimer -= dt;
+        const t = Math.max(0, enemy.deathTimer / 0.3);
+        enemy.mesh.scale.setScalar(t);
+        enemy.mesh.material.emissiveIntensity = 2 * (1 - t);
+        if (enemy.deathTimer <= 0) {
+          this._setEnemyAlive(enemy, false);
+          enemy.mesh.scale.setScalar(1);
+          enemy.mesh.material.emissiveIntensity = 1;
+        }
+        continue;
+      }
 
       if (!enemy.alive) {
         if (enemy.respawnAt > 0 && elapsed >= enemy.respawnAt) {

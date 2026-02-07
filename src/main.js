@@ -7,6 +7,7 @@ import { PlayerController } from "./player.js";
 import { CollectibleSystem } from "./collectibles.js";
 import { EnemySystem } from "./enemies.js";
 import { loadGame, resetSave, saveGame } from "./save.js";
+import { ParticleSystem } from "./particles.js";
 import {
   setCombatStatus,
   setHealth,
@@ -57,6 +58,7 @@ sun.shadow.camera.bottom = -55;
 scene.add(sun);
 
 const world = createWorld(scene);
+const particles = new ParticleSystem(scene);
 
 const gameState = {
   score: 0,
@@ -261,6 +263,8 @@ function spawnPlayerProjectile(weapon, origin, direction) {
     damage: weapon.damage,
     weaponLabel: weapon.label,
     hitTone: weapon.toneImpact,
+    trailColor: weapon.projectileColor || 0xffffff,
+    trailCounter: 0,
   });
 }
 
@@ -278,6 +282,12 @@ function updatePlayerProjectiles(dt, gameTime) {
     previousProjectilePosition.copy(p.mesh.position);
     p.mesh.position.addScaledVector(p.velocity, dt);
 
+    // Projectile trail (every other frame)
+    p.trailCounter++;
+    if (p.trailCounter % 2 === 0) {
+      particles.trail(p.mesh.position, p.trailColor);
+    }
+
     const segment = p.mesh.position.clone().sub(previousProjectilePosition);
     const segmentLength = segment.length();
     let consumed = false;
@@ -293,7 +303,9 @@ function updatePlayerProjectiles(dt, gameTime) {
 
       if (attack.hit) {
         playTone(p.hitTone || 760, 0.06, "square", 0.09);
+        particles.bulletImpact(p.mesh.position, p.trailColor);
         if (attack.killed) {
+          if (attack.deathPos) particles.enemyDeath(attack.deathPos, attack.deathColor);
           applyKillRewards(attack.score, attack.xp, p.weaponLabel);
         } else {
           setStatus(`${p.weaponLabel}: hit confirmed.`);
@@ -344,6 +356,10 @@ function performAttack(gameTime) {
       .normalize();
     spawnPlayerProjectile(weapon, muzzleOrigin, tempAimVector);
   }
+
+  // Muzzle flash particle effect
+  camera.getWorldDirection(centerRayDirection);
+  particles.muzzleFlash(muzzleOrigin, centerRayDirection);
 
   playTone(weapon.toneShot, 0.05, "triangle", 0.05);
   events.emit("weapon-fired", { weaponId: weapon.id });
@@ -731,9 +747,19 @@ function animate() {
     updateWeaponStatus(gameTime);
   }
 
+  particles.update(dt);
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
 }
+
+// Event-driven particle effects
+events.on("item-collected", () => {
+  particles.collectPickup(player.position, 0xffcc44);
+});
+
+events.on("level-up", () => {
+  particles.levelUp(player.position);
+});
 
 setStatus("Explore, survive, fight enemies. LMB attack. 1/2/3 spend upgrade points.");
 animate();
