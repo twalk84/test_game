@@ -10,6 +10,8 @@ import { loadGame, resetSave, saveGame } from "./save.js";
 import { ParticleSystem } from "./particles.js";
 import { AbilitySystem } from "./abilities.js";
 import { LootSystem } from "./loot.js";
+import { Minimap } from "./minimap.js";
+import { DamageNumberSystem } from "./damageNumbers.js";
 import {
   setAbilityStatus,
   setBuffStatus,
@@ -22,6 +24,8 @@ import {
   setStamina,
   setStatus,
   setWeaponStatus,
+  showDeathScreen,
+  hideDeathScreen,
 } from "./ui.js";
 
 const canvas = document.getElementById("game");
@@ -66,6 +70,16 @@ const world = createWorld(scene);
 const particles = new ParticleSystem(scene);
 const abilities = new AbilitySystem();
 const loot = new LootSystem(scene, world.getHeightAt);
+const minimap = new Minimap();
+const damageNumbers = new DamageNumberSystem(camera);
+
+// Session stats for death screen
+const sessionStats = {
+  kills: 0,
+  survivalTime: 0,
+};
+let isDead = false;
+let deathTimestamp = 0;
 
 const gameState = {
   score: 0,
@@ -258,6 +272,7 @@ function updateCombatStatus(gameTime) {
 function applyKillRewards(score, xp, weaponLabel) {
   gameState.score += score;
   addXp(xp);
+  sessionStats.kills += 1;
   setScore(gameState.score);
   setStatus(`${weaponLabel}: downed enemy (+${score} score, +${xp} XP)`);
   playTonePreset("kill");
@@ -304,6 +319,8 @@ function handleGrenadeExplosion(p, gameTime) {
   const results = enemies.applyAoeDamage(pos, p.explosionRadius, p.splashDamage, gameTime);
 
   for (const r of results) {
+    const pos = r.deathPos || r.hitPos;
+    if (pos) damageNumbers.spawn(pos, p.splashDamage, "#ff8833", true);
     if (r.killed) {
       if (r.deathPos) particles.enemyDeath(r.deathPos, r.deathColor);
       applyKillRewards(r.score, r.xp, p.weaponLabel);
@@ -351,6 +368,7 @@ function updatePlayerProjectiles(dt, gameTime) {
         } else {
           playTone(p.hitTone || 760, 0.06, "square", 0.09);
           particles.bulletImpact(p.mesh.position, p.trailColor);
+          damageNumbers.spawn(p.mesh.position, p.damage, "#ffffff");
           if (attack.killed) {
             if (attack.deathPos) particles.enemyDeath(attack.deathPos, attack.deathColor);
             applyKillRewards(attack.score, attack.xp, p.weaponLabel);
@@ -704,7 +722,12 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
-  if (gameState.paused) return;
+  if (e.code === "KeyM") {
+    minimap.cycleZoom();
+    return;
+  }
+
+  if (gameState.paused || isDead) return;
 
   if (e.code === "KeyK") {
     performSave();
@@ -743,6 +766,8 @@ window.addEventListener("keydown", (e) => {
       // Apply actual damage through enemy system
       const aoeResults = enemies.applyAoeDamage(player.position, shockCfg.radius, shockCfg.damage, gameTime);
       for (const r of aoeResults) {
+        const pos = r.deathPos || r.hitPos;
+        if (pos) damageNumbers.spawn(pos, shockCfg.damage, "#88ccff", true);
         if (r.killed) {
           if (r.deathPos) particles.enemyDeath(r.deathPos, r.deathColor);
           applyKillRewards(r.score, r.xp, "Shockwave");
@@ -755,10 +780,33 @@ window.addEventListener("keydown", (e) => {
 
 canvas.addEventListener("click", () => {
   ensureAudio();
+  if (isDead) return; // respawn handled by death screen
   if (!gameState.paused && document.pointerLockElement !== canvas) {
     canvas.requestPointerLock();
     setStatus("Mouse locked.");
   }
+});
+
+// Death screen click-to-respawn
+document.getElementById("deathScreen")?.addEventListener("click", () => {
+  const elapsed = (performance.now() - deathTimestamp) / 1000;
+  if (elapsed < 3) return; // 3 second minimum
+  isDead = false;
+  hideDeathScreen();
+  gameState.health = gameState.maxHealth;
+  gameState.stamina = gameState.maxStamina;
+  player.setPosition(0, world.getHeightAt(0, 0) + CONFIG.player.height, 0);
+  loot.cleanup();
+  buffs.damage.active = false;
+  buffs.damage.multiplier = 1;
+  buffs.speed.active = false;
+  buffs.speed.multiplier = 1;
+  sessionStats.kills = 0;
+  sessionStats.survivalTime = 0;
+  setHealth(gameState.health, gameState.maxHealth);
+  setStamina(gameState.stamina, gameState.maxStamina);
+  setStatus("Respawned. Good luck!");
+  events.emit("player-respawned");
 });
 
 canvas.addEventListener("contextmenu", (e) => {
@@ -766,7 +814,7 @@ canvas.addEventListener("contextmenu", (e) => {
 });
 
 window.addEventListener("mousedown", (e) => {
-  if (e.button !== 0) return;
+  if (e.button !== 0 || isDead) return;
   performAttack(gameTime);
 });
 
@@ -820,7 +868,7 @@ function animate() {
   wallTime += dt;
   world.updateDayNight(wallTime, sun, hemi);
 
-  if (!gameState.paused) {
+  if (!gameState.paused && !isDead) {
     gameTime += dt;
 
     const playerResult = player.update(dt);
@@ -854,6 +902,7 @@ function animate() {
     const enemyResult = enemies.update(dt, gameTime, player.position);
     if (enemyResult.playerDamage > 0 && !abilities.isInvulnerable(gameTime)) {
       gameState.health = clamp(gameState.health - enemyResult.playerDamage, 0, gameState.maxHealth);
+      damageNumbers.spawn(player.position, enemyResult.playerDamage, "#ff4444", true);
       if (enemyResult.hitByProjectile) {
         setStatus(`Hit by projectile! -${Math.round(enemyResult.playerDamage)} HP`);
       }
@@ -912,19 +961,23 @@ function animate() {
       startObjective(Math.max(1, objective.tier));
     }
 
-    if (gameState.health <= 0) {
-      gameState.health = gameState.maxHealth;
-      gameState.stamina = gameState.maxStamina;
-      player.setPosition(0, world.getHeightAt(0, 0) + CONFIG.player.height, 0);
-      setStatus("You were downed! Respawned at origin.");
+    if (gameState.health <= 0 && !isDead) {
+      isDead = true;
+      deathTimestamp = performance.now();
       playTonePreset("death");
       events.emit("player-died");
-      loot.cleanup();
-      buffs.damage.active = false;
-      buffs.damage.multiplier = 1;
-      buffs.speed.active = false;
-      buffs.speed.multiplier = 1;
+      if (document.pointerLockElement === canvas) {
+        document.exitPointerLock();
+      }
+      showDeathScreen({
+        kills: sessionStats.kills,
+        score: gameState.score,
+        level: gameState.level,
+        survivalTime: sessionStats.survivalTime,
+      });
     }
+
+    sessionStats.survivalTime += dt;
 
     setHealth(gameState.health, gameState.maxHealth);
     setStamina(gameState.stamina, gameState.maxStamina);
@@ -932,9 +985,13 @@ function animate() {
     updateCombatStatus(gameTime);
     updateWeaponStatus(gameTime);
     setAbilityStatus(abilities.getCooldownInfo(gameTime));
+
+    // Update minimap
+    minimap.update(player.position, player.yaw, enemies.enemies, collectibles.items, CONFIG.world.hazardZones);
   }
 
   particles.update(dt);
+  damageNumbers.update(dt);
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
 }

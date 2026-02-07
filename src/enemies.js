@@ -145,7 +145,7 @@ export class EnemySystem {
       };
     }
 
-    return { hit: true, killed: false, score: 0, xp: 0, type: enemy.type };
+    return { hit: true, killed: false, score: 0, xp: 0, type: enemy.type, hitPos: enemy.mesh.position.clone() };
   }
 
   applyAoeDamage(center, radius, damage, time) {

@@ -67,6 +67,25 @@ export function setBuffStatus(text) {
   if (el) el.textContent = text;
 }
 
+export function showDeathScreen(stats) {
+  const el = document.getElementById("deathScreen");
+  if (!el) return;
+  const statsEl = document.getElementById("deathStats");
+  if (statsEl) {
+    statsEl.innerHTML =
+      `<div>Kills: ${stats.kills}</div>` +
+      `<div>Score: ${stats.score}</div>` +
+      `<div>Level: ${stats.level}</div>` +
+      `<div>Survival time: ${Math.floor(stats.survivalTime)}s</div>`;
+  }
+  el.classList.remove("hidden");
+}
+
+export function hideDeathScreen() {
+  const el = document.getElementById("deathScreen");
+  if (el) el.classList.add("hidden");
+}
+
 export function setPauseMenuVisible(visible) {
   const menu = document.getElementById("pauseMenu");
   if (!menu) return;
