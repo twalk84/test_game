@@ -97,6 +97,7 @@ export class EnemySystem {
         maxHealth: cfg.maxHealth,
         health: cfg.maxHealth,
         state: "idle",
+        isProvoked: false,
         alive: true,
         spawnPos: spawnPos.clone(),
         nextAttackAt: 0,
@@ -120,6 +121,7 @@ export class EnemySystem {
 
   _applyDamage(enemy, amount, time) {
     if (!enemy.alive) return { hit: false, killed: false, score: 0, xp: 0, type: enemy.type };
+    enemy.isProvoked = true;
     enemy.health = Math.max(0, enemy.health - amount);
     enemy.aggroUntil = Math.max(enemy.aggroUntil, time + 8);
     enemy.hitFlashUntil = time + 0.1;
@@ -213,6 +215,8 @@ export class EnemySystem {
           enemy.health = enemy.maxHealth;
           enemy.respawnAt = 0;
           enemy.state = "idle";
+          enemy.isProvoked = false;
+          enemy.aggroUntil = 0;
           enemy.spawnPos = this._randomSpawnPosition();
           enemy.mesh.position.copy(enemy.spawnPos).add(new THREE.Vector3(0, 0.9, 0));
           this._setEnemyAlive(enemy, true);
@@ -223,6 +227,19 @@ export class EnemySystem {
       const toPlayer = playerPos.clone().sub(enemy.mesh.position);
       toPlayer.y = 0;
       const dist = toPlayer.length();
+      if (!enemy.isProvoked) {
+        enemy.state = "patrol";
+        enemy.patrolTimer -= dt;
+        if (enemy.patrolTimer <= 0) {
+          enemy.patrolTimer = 1 + Math.random() * 3;
+          enemy.patrolDir
+            .set(Math.random() - 0.5, 0, Math.random() - 0.5)
+            .normalize();
+        }
+        this._moveOnTerrain(enemy, enemy.patrolDir.clone().multiplyScalar(cfg.speed * 0.45), dt);
+        continue;
+      }
+
       const hasAggro = dist < cfg.detectionRange || elapsed < enemy.aggroUntil;
 
       if (!hasAggro) {
@@ -306,6 +323,7 @@ export class EnemySystem {
       y: enemy.mesh.position.y,
       z: enemy.mesh.position.z,
       health: enemy.health,
+      isProvoked: enemy.isProvoked,
       nextAttackAt: enemy.nextAttackAt,
       respawnAt: enemy.respawnAt,
       aggroUntil: enemy.aggroUntil,
@@ -321,6 +339,7 @@ export class EnemySystem {
       if (!enemy) continue;
 
       enemy.health = clamp(numberOr(saved.health, enemy.maxHealth), 0, enemy.maxHealth);
+      enemy.isProvoked = Boolean(saved.isProvoked);
       enemy.nextAttackAt = numberOr(saved.nextAttackAt, 0);
       enemy.aggroUntil = numberOr(saved.aggroUntil, 0);
 
@@ -336,6 +355,9 @@ export class EnemySystem {
       }
       this._setEnemyAlive(enemy, alive);
       enemy.state = alive ? "idle" : "dead";
+      if (!alive) {
+        enemy.isProvoked = false;
+      }
     }
 
     for (const projectile of this.projectiles) {
