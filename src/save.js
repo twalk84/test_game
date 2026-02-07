@@ -1,39 +1,42 @@
-const SAVE_KEY = "open_world_mvp_save_v3";
-const LEGACY_KEYS = ["open_world_mvp_save_v2", "open_world_mvp_save_v1"];
+const SAVE_PREFIX = "open_world_mvp_slot_";
+const LEGACY_KEYS = ["open_world_mvp_save_v3", "open_world_mvp_save_v2", "open_world_mvp_save_v1"];
+const MAX_SLOTS = 3;
+const SAVE_VERSION = 4;
 
 function migrate(data) {
   if (!data || typeof data !== "object") return null;
 
-  // v1/v2 saves have no version field — treat as v2
-  if (!data.version) {
-    data.version = 2;
-  }
-
-  // Migrate v2 → v3: add version field (already set above)
-  if (data.version === 2) {
-    data.version = 3;
-  }
+  if (!data.version) data.version = 2;
+  if (data.version === 2) data.version = 3;
+  if (data.version === 3) data.version = 4;
 
   return data;
 }
 
-export function saveGame(data) {
-  localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+function slotKey(slot) {
+  return SAVE_PREFIX + slot;
 }
 
-export function loadGame() {
+export function saveGame(data, slot = 0) {
+  data.version = SAVE_VERSION;
+  data.savedAt = Date.now();
+  localStorage.setItem(slotKey(slot), JSON.stringify(data));
+}
+
+export function loadGame(slot = 0) {
   try {
-    const raw = localStorage.getItem(SAVE_KEY);
+    const raw = localStorage.getItem(slotKey(slot));
     if (raw) return migrate(JSON.parse(raw));
 
-    // Try legacy keys in order
-    for (const key of LEGACY_KEYS) {
-      const legacyRaw = localStorage.getItem(key);
-      if (legacyRaw) {
-        const data = migrate(JSON.parse(legacyRaw));
-        // Re-save under new key so future loads are faster
-        if (data) saveGame(data);
-        return data;
+    // Try legacy keys (only for slot 0)
+    if (slot === 0) {
+      for (const key of LEGACY_KEYS) {
+        const legacyRaw = localStorage.getItem(key);
+        if (legacyRaw) {
+          const data = migrate(JSON.parse(legacyRaw));
+          if (data) saveGame(data, 0);
+          return data;
+        }
       }
     }
     return null;
@@ -42,9 +45,54 @@ export function loadGame() {
   }
 }
 
-export function resetSave() {
-  localStorage.removeItem(SAVE_KEY);
-  for (const key of LEGACY_KEYS) {
-    localStorage.removeItem(key);
+export function resetSave(slot = 0) {
+  localStorage.removeItem(slotKey(slot));
+  if (slot === 0) {
+    for (const key of LEGACY_KEYS) {
+      localStorage.removeItem(key);
+    }
+  }
+}
+
+export function getSlotInfo() {
+  const slots = [];
+  for (let i = 0; i < MAX_SLOTS; i++) {
+    try {
+      const raw = localStorage.getItem(slotKey(i));
+      if (raw) {
+        const data = JSON.parse(raw);
+        slots.push({
+          slot: i,
+          exists: true,
+          level: data.level || 1,
+          score: data.score || 0,
+          savedAt: data.savedAt || 0,
+          playtime: data.playtime || 0,
+        });
+      } else {
+        slots.push({ slot: i, exists: false });
+      }
+    } catch {
+      slots.push({ slot: i, exists: false });
+    }
+  }
+  return slots;
+}
+
+export function exportSave(slot = 0) {
+  const raw = localStorage.getItem(slotKey(slot));
+  if (!raw) return null;
+  return btoa(raw);
+}
+
+export function importSave(base64String, slot = 0) {
+  try {
+    const raw = atob(base64String);
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== "object") return false;
+    localStorage.setItem(slotKey(slot), raw);
+    return true;
+  } catch {
+    return false;
   }
 }

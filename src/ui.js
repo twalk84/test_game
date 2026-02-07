@@ -86,6 +86,16 @@ export function hideDeathScreen() {
   if (el) el.classList.add("hidden");
 }
 
+export function setWeatherBiome(weatherState, biomeName) {
+  const el = document.getElementById("weatherBiome");
+  if (el) el.textContent = `${biomeName} — ${weatherState.charAt(0).toUpperCase() + weatherState.slice(1)}`;
+}
+
+export function setQuestStatus(text) {
+  const el = document.getElementById("questStatus");
+  if (el) el.textContent = text;
+}
+
 export function setPauseMenuVisible(visible) {
   const menu = document.getElementById("pauseMenu");
   if (!menu) return;

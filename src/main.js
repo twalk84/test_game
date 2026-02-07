@@ -12,6 +12,12 @@ import { AbilitySystem } from "./abilities.js";
 import { LootSystem } from "./loot.js";
 import { Minimap } from "./minimap.js";
 import { DamageNumberSystem } from "./damageNumbers.js";
+import { WeatherSystem } from "./weather.js";
+import { BiomeSystem } from "./biomes.js";
+import { BossSystem } from "./bosses.js";
+import { QuestSystem } from "./quests.js";
+import { SoundDesigner } from "./soundDesign.js";
+import { SpatialGrid } from "./spatialGrid.js";
 import {
   setAbilityStatus,
   setBuffStatus,
@@ -20,10 +26,12 @@ import {
   setObjective,
   setPauseMenuVisible,
   setProgression,
+  setQuestStatus,
   setScore,
   setStamina,
   setStatus,
   setWeaponStatus,
+  setWeatherBiome,
   showDeathScreen,
   hideDeathScreen,
 } from "./ui.js";
@@ -72,6 +80,15 @@ const abilities = new AbilitySystem();
 const loot = new LootSystem(scene, world.getHeightAt);
 const minimap = new Minimap();
 const damageNumbers = new DamageNumberSystem(camera);
+const weather = new WeatherSystem(scene);
+const biomes = new BiomeSystem();
+const boss = new BossSystem(scene, world.getHeightAt);
+const quests = new QuestSystem();
+const spatialGrid = new SpatialGrid(CONFIG.world.size);
+
+let soundDesigner; // initialized after audio context exists
+let autoSaveTimer = 60; // auto-save every 60s
+let totalPlaytime = 0;
 
 // Session stats for death screen
 const sessionStats = {
@@ -211,6 +228,13 @@ function ensureAudio() {
     ambientOsc.connect(ambientGain);
     ambientGain.connect(masterGain);
     ambientOsc.start();
+  }
+  if (!soundDesigner) {
+    soundDesigner = new SoundDesigner(
+      () => audioCtx,
+      () => masterGain,
+      () => gameState.settings.mute
+    );
   }
   if (audioCtx.state === "suspended") {
     audioCtx.resume();
@@ -381,6 +405,31 @@ function updatePlayerProjectiles(dt, gameTime) {
         playerProjectiles.splice(i, 1);
         consumed = true;
       }
+
+      // Boss hit detection
+      if (!consumed && boss.isActive) {
+        const bossHit = boss.tryHitFromRay(
+          previousProjectilePosition,
+          segment.clone().normalize(),
+          segmentLength + 0.1,
+          p.damage,
+          gameTime
+        );
+        if (bossHit.hit) {
+          playTone(p.hitTone || 760, 0.06, "square", 0.09);
+          particles.bulletImpact(p.mesh.position, p.trailColor);
+          const bPos = bossHit.deathPos || bossHit.hitPos;
+          if (bPos) damageNumbers.spawn(bPos, p.damage, "#ffdd44", true);
+          if (bossHit.killed) {
+            if (bossHit.deathPos) particles.enemyDeath(bossHit.deathPos, bossHit.deathColor);
+            applyKillRewards(bossHit.score, bossHit.xp, p.weaponLabel);
+            setStatus("BOSS DEFEATED!");
+          }
+          cleanupProjectile(p);
+          playerProjectiles.splice(i, 1);
+          consumed = true;
+        }
+      }
     }
 
     if (consumed) continue;
@@ -432,6 +481,7 @@ function performAttack(gameTime) {
   particles.muzzleFlash(muzzleOrigin, centerRayDirection);
 
   playTone(weapon.toneShot, 0.05, "triangle", 0.05);
+  if (soundDesigner) soundDesigner.playWeaponFire(weaponState.activeId);
   events.emit("weapon-fired", { weaponId: weapon.id });
 }
 
@@ -579,7 +629,7 @@ function setPaused(shouldPause) {
 
 function buildSaveState() {
   return {
-    version: 3,
+    version: 4,
     position: player.getPositionArray(),
     collectedIds: collectibles.getCollectedList(),
     enemies: enemies.getSaveState(),
@@ -603,6 +653,9 @@ function buildSaveState() {
       unlocked: weaponState.unlocked,
     },
     abilities: abilities.getSaveState(),
+    weather: weather.getSaveState(),
+    quests: quests.getSaveState(),
+    playtime: totalPlaytime,
   };
 }
 
@@ -694,6 +747,10 @@ function performLoad() {
   combatState.nextAttackAt = Math.max(0, numberOr(loadedCombat.nextAttackAt, 0));
 
   abilities.applySaveState(data.abilities, gameTime);
+  weather.applySaveState(data.weather);
+  quests.applySaveState(data.quests);
+  if (typeof data.playtime === "number") totalPlaytime = data.playtime;
+  boss.cleanup();
 
   // Reset buffs on load
   buffs.damage.active = false;
@@ -797,6 +854,7 @@ document.getElementById("deathScreen")?.addEventListener("click", () => {
   gameState.stamina = gameState.maxStamina;
   player.setPosition(0, world.getHeightAt(0, 0) + CONFIG.player.height, 0);
   loot.cleanup();
+  boss.cleanup();
   buffs.damage.active = false;
   buffs.damage.multiplier = 1;
   buffs.speed.active = false;
@@ -899,6 +957,31 @@ function animate() {
       events.emit("player-damaged", { amount: zoneDamage, source: "hazard" });
     }
 
+    // Weather update
+    const weatherResult = weather.update(dt, gameTime, player.position);
+    if (weatherResult.thunderReady && soundDesigner) {
+      soundDesigner.playThunder();
+    }
+    const windForce = weather.getWindForce();
+    if (windForce) {
+      player.addImpulse(windForce.multiplyScalar(dt));
+    }
+
+    // Biome update
+    const biomeResult = biomes.update(player.position.x, player.position.z);
+    setWeatherBiome(weather.state, biomes.getCurrentLabel());
+
+    // Sound designer updates
+    if (soundDesigner) {
+      soundDesigner.setRainIntensity(weatherResult.rainIntensity);
+      soundDesigner.setWindIntensity(weather.state === "storm" ? 0.8 : weather.state === "rain" ? 0.3 : 0.1);
+      soundDesigner.updateFootsteps(dt, playerResult.hasMoveInput, playerResult.sprinting);
+      soundDesigner.updateMusic(dt, enemies.enemies.some(e => e.alive && e.isProvoked));
+    }
+
+    // Spatial grid rebuild
+    spatialGrid.rebuild(enemies.enemies);
+
     const enemyResult = enemies.update(dt, gameTime, player.position);
     if (enemyResult.playerDamage > 0 && !abilities.isInvulnerable(gameTime)) {
       gameState.health = clamp(gameState.health - enemyResult.playerDamage, 0, gameState.maxHealth);
@@ -913,6 +996,25 @@ function animate() {
     // Apply tank knockback
     if (enemyResult.knockback) {
       player.addImpulse(enemyResult.knockback);
+    }
+
+    // Boss update
+    if (boss.isActive) {
+      const bossResult = boss.update(dt, gameTime, player.position);
+      if (bossResult.playerDamage > 0 && !abilities.isInvulnerable(gameTime)) {
+        gameState.health = clamp(gameState.health - bossResult.playerDamage, 0, gameState.maxHealth);
+        damageNumbers.spawn(player.position, bossResult.playerDamage, "#ff2222", true);
+        if (bossResult.slamHit) {
+          setStatus("Boss ground slam!");
+          if (soundDesigner) soundDesigner.playExplosion();
+          particles.levelUp(player.position);
+        }
+        playTonePreset("damage");
+        events.emit("player-damaged", { amount: bossResult.playerDamage, source: "boss" });
+      }
+      if (bossResult.spawnAdds && bossResult.addPosition) {
+        enemies.spawn(bossResult.addCount);
+      }
     }
 
     // Abilities update
@@ -953,12 +1055,48 @@ function animate() {
       setStatus(`Objective complete! +${objective.rewardScore} score, +${objective.rewardXp} XP`);
       playTonePreset("objectiveComplete");
       events.emit("objective-complete", { tier: objective.tier, score: objective.rewardScore, xp: objective.rewardXp });
-      startObjective(objective.tier + 1);
+      const nextTier = objective.tier + 1;
+      startObjective(nextTier);
+
+      // Boss spawns every 5th tier
+      if (nextTier % 5 === 0 && !boss.isActive) {
+        boss.spawn(player.position);
+        setStatus("A BOSS HAS APPEARED!");
+        playTonePreset("death"); // dramatic tone
+      }
     } else if (objective.timeLeft <= 0) {
       setStatus("Objective failed. Restarting challenge.");
       playTonePreset("objectiveFail");
       events.emit("objective-failed", { tier: objective.tier });
       startObjective(Math.max(1, objective.tier));
+    }
+
+    // Quest update
+    const questResult = quests.update(dt, player.position);
+    if (questResult) {
+      if (questResult.type === "completed") {
+        gameState.score += questResult.rewardScore;
+        addXp(questResult.rewardXp);
+        setScore(gameState.score);
+        setStatus(`Quest complete: ${questResult.quest.label}! +${questResult.rewardScore} score, +${questResult.rewardXp} XP`);
+        playTonePreset("objectiveComplete");
+        events.emit("quest-complete", { quest: questResult.quest });
+        // Auto-generate next quest
+        quests.generate(quests.tier + 1);
+      } else if (questResult.type === "failed") {
+        setStatus(`Quest failed: ${questResult.quest.label}. Try again!`);
+        playTonePreset("objectiveFail");
+        quests.generate(quests.tier);
+      }
+    }
+    setQuestStatus(quests.getDisplayText());
+
+    // Auto-save every 60s
+    totalPlaytime += dt;
+    autoSaveTimer -= dt;
+    if (autoSaveTimer <= 0) {
+      autoSaveTimer = 60;
+      saveGame(buildSaveState());
     }
 
     if (gameState.health <= 0 && !isDead) {
@@ -1004,6 +1142,9 @@ events.on("item-collected", () => {
 events.on("level-up", () => {
   particles.levelUp(player.position);
 });
+
+// Generate initial quest
+quests.generate(1);
 
 setStatus("Explore, survive, fight. LMB attack, Q weapon, E dash, F heal, C shockwave.");
 animate();
