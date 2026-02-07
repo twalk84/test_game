@@ -1,53 +1,15 @@
 import * as THREE from "https://unpkg.com/three@0.161.0/build/three.module.js";
+import { CONFIG } from "./config.js";
+import { clamp, numberOr } from "./utils.js";
 
-const ENEMY_TYPES = {
-  bruiser: {
-    color: 0xc45454,
-    emissive: 0x2a1010,
-    speed: 4.2,
-    maxHealth: 42,
-    attackRange: 2.2,
-    attackDamage: 8,
-    attackCooldown: 1.0,
-    detectionRange: 22,
-    rewardScore: 6,
-    rewardXp: 22,
-    respawnDelay: 20,
-    size: 0.85,
-  },
-  shooter: {
-    color: 0x4f7acb,
-    emissive: 0x0f1733,
-    speed: 3.8,
-    maxHealth: 32,
-    attackRange: 24,
-    attackDamage: 7,
-    attackCooldown: 1.4,
-    detectionRange: 28,
-    rewardScore: 8,
-    rewardXp: 28,
-    respawnDelay: 24,
-    preferredRange: 13,
-    size: 0.75,
-    projectileSpeed: 18,
-  },
-};
-
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function numberOr(value, fallback) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-}
+const ENEMY_TYPES = CONFIG.enemies;
 
 export class EnemySystem {
   constructor(scene, getHeightAt, worldSize = 220) {
     this.scene = scene;
     this.getHeightAt = getHeightAt;
     this.worldSize = worldSize;
-    this.maxWorld = worldSize * 0.5 - 4;
+    this.maxWorld = worldSize * 0.5 - CONFIG.world.boundaryPadding;
     this.enemies = [];
     this.enemyMeshToId = new Map();
     this.projectiles = [];
@@ -163,7 +125,7 @@ export class EnemySystem {
 
   _updateEnemyVisual(enemy, time) {
     const mat = enemy.mesh.material;
-    if (!mat || !mat.emissiveIntensity && mat.emissiveIntensity !== 0) return;
+    if (!mat || typeof mat.emissiveIntensity !== "number") return;
     mat.emissiveIntensity = time < enemy.hitFlashUntil ? 1.45 : 1;
   }
 
@@ -195,6 +157,12 @@ export class EnemySystem {
       life: 3,
       damage: cfg.attackDamage,
     });
+  }
+
+  _cleanupProjectile(p) {
+    p.mesh.geometry.dispose();
+    p.mesh.material.dispose();
+    this.scene.remove(p.mesh);
   }
 
   update(dt, elapsed, playerPos) {
@@ -298,7 +266,7 @@ export class EnemySystem {
 
       const yGround = this.getHeightAt(p.mesh.position.x, p.mesh.position.z);
       const hitGround = p.mesh.position.y <= yGround + 0.2;
-      const hitPlayer = p.mesh.position.distanceTo(playerPos) < 1.2;
+      const hitPlayer = p.mesh.position.distanceTo(playerPos) < CONFIG.player.projectileHitRadius;
 
       if (hitPlayer) {
         result.playerDamage += p.damage;
@@ -306,7 +274,7 @@ export class EnemySystem {
       }
 
       if (p.life <= 0 || hitGround || hitPlayer) {
-        this.scene.remove(p.mesh);
+        this._cleanupProjectile(p);
         this.projectiles.splice(i, 1);
       }
     }
@@ -361,7 +329,7 @@ export class EnemySystem {
     }
 
     for (const projectile of this.projectiles) {
-      this.scene.remove(projectile.mesh);
+      this._cleanupProjectile(projectile);
     }
     this.projectiles = [];
   }

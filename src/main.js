@@ -1,4 +1,7 @@
 import * as THREE from "https://unpkg.com/three@0.161.0/build/three.module.js";
+import { CONFIG } from "./config.js";
+import { clamp, numberOr } from "./utils.js";
+import { events } from "./events.js";
 import { createWorld } from "./world.js";
 import { PlayerController } from "./player.js";
 import { CollectibleSystem } from "./collectibles.js";
@@ -16,22 +19,13 @@ import {
   setWeaponStatus,
 } from "./ui.js";
 
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function numberOr(value, fallback) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-}
-
 const canvas = document.getElementById("game");
 const sensitivityInput = document.getElementById("sensitivity");
 const volumeInput = document.getElementById("volume");
 const muteInput = document.getElementById("mute");
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, CONFIG.rendering.maxPixelRatio));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -40,10 +34,10 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87b8eb);
 
 const camera = new THREE.PerspectiveCamera(
-  70,
+  CONFIG.camera.fov,
   window.innerWidth / window.innerHeight,
-  0.1,
-  500
+  CONFIG.camera.near,
+  CONFIG.camera.far
 );
 
 // Lighting
@@ -53,7 +47,7 @@ scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xfff7dd, 1.0);
 sun.position.set(28, 45, 20);
 sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.mapSize.set(CONFIG.rendering.shadowMapSize, CONFIG.rendering.shadowMapSize);
 sun.shadow.camera.near = 1;
 sun.shadow.camera.far = 140;
 sun.shadow.camera.left = -55;
@@ -80,20 +74,20 @@ const gameState = {
   },
   paused: false,
   settings: {
-    sensitivity: 1,
-    volume: 0.4,
-    mute: false,
+    sensitivity: CONFIG.settings.defaultSensitivity,
+    volume: CONFIG.settings.defaultVolume,
+    mute: CONFIG.settings.defaultMute,
   },
 };
 
 const objective = {
   tier: 1,
-  target: 3,
-  timeLimit: 45,
-  timeLeft: 45,
+  target: CONFIG.objectives.baseTarget,
+  timeLimit: CONFIG.objectives.baseTimeLimit,
+  timeLeft: CONFIG.objectives.baseTimeLimit,
   collected: 0,
-  rewardScore: 10,
-  rewardXp: 40,
+  rewardScore: CONFIG.objectives.baseRewardScore,
+  rewardXp: CONFIG.objectives.baseRewardXp,
 };
 
 function refreshObjectiveText() {
@@ -103,13 +97,14 @@ function refreshObjectiveText() {
 }
 
 function startObjective(nextTier = objective.tier) {
+  const cfg = CONFIG.objectives;
   objective.tier = nextTier;
-  objective.target = 3 + (nextTier - 1);
-  objective.timeLimit = Math.max(24, 45 - (nextTier - 1) * 2);
+  objective.target = cfg.baseTarget + (nextTier - 1);
+  objective.timeLimit = Math.max(cfg.minTimeLimit, cfg.baseTimeLimit - (nextTier - 1) * cfg.timeLimitDecay);
   objective.timeLeft = objective.timeLimit;
   objective.collected = 0;
-  objective.rewardScore = 10 + nextTier * 5;
-  objective.rewardXp = 40 + nextTier * 14;
+  objective.rewardScore = cfg.baseRewardScore + nextTier * cfg.rewardScorePerTier;
+  objective.rewardXp = cfg.baseRewardXp + nextTier * cfg.rewardXpPerTier;
   refreshObjectiveText();
 }
 
@@ -119,74 +114,32 @@ const player = new PlayerController(camera, world.getHeightAt, {
   canSprint: (dt, wantsSprintMove) => {
     if (!wantsSprintMove) return false;
     if (gameState.stamina <= 0) return false;
-    gameState.stamina = clamp(gameState.stamina - 20 * dt, 0, gameState.maxStamina);
+    gameState.stamina = clamp(gameState.stamina - CONFIG.player.sprintStaminaCost * dt, 0, gameState.maxStamina);
     return true;
   },
   consumeJumpCost: () => {
-    const jumpCost = 15;
+    const jumpCost = CONFIG.player.jumpStaminaCost;
     if (gameState.stamina < jumpCost) return false;
     gameState.stamina = clamp(gameState.stamina - jumpCost, 0, gameState.maxStamina);
     return true;
   },
 });
-player.setPosition(0, world.getHeightAt(0, 0) + 1.6, 0);
+player.setPosition(0, world.getHeightAt(0, 0) + CONFIG.player.height, 0);
 
-const collectibles = new CollectibleSystem(scene, world.getHeightAt, world.worldSize);
-collectibles.spawn(45);
+const collectibles = new CollectibleSystem(scene, world.getHeightAt, CONFIG.world.size);
+collectibles.spawn(CONFIG.collectibles.spawnCount);
 
-const enemies = new EnemySystem(scene, world.getHeightAt, world.worldSize);
+const enemies = new EnemySystem(scene, world.getHeightAt, CONFIG.world.size);
 enemies.spawn(12);
 
 const combatState = {
   nextAttackAt: 0,
 };
 
-const weaponDefs = {
-  rifle: {
-    id: "rifle",
-    label: "Rifle",
-    damage: 18,
-    range: 30,
-    cooldown: 0.26,
-    projectileSpeed: 52,
-    projectileLife: 1.2,
-    projectileRadius: 0.08,
-    projectileColor: 0xfff2a8,
-    toneHit: 760,
-    toneMiss: 300,
-  },
-  shotgun: {
-    id: "shotgun",
-    label: "Shotgun",
-    damage: 8,
-    range: 18,
-    cooldown: 0.85,
-    pellets: 6,
-    spread: 0.08,
-    projectileSpeed: 42,
-    projectileLife: 0.45,
-    projectileRadius: 0.06,
-    projectileColor: 0xffc78b,
-    toneHit: 690,
-    toneMiss: 250,
-  },
-  pulse: {
-    id: "pulse",
-    label: "Pulse",
-    damage: 11,
-    range: 26,
-    cooldown: 0.14,
-    projectileSpeed: 60,
-    projectileLife: 0.9,
-    projectileRadius: 0.065,
-    projectileColor: 0x8fd6ff,
-    toneHit: 820,
-    toneMiss: 340,
-  },
-};
+const weaponDefs = CONFIG.weapons;
 
 const weaponState = {
-  order: ["rifle", "shotgun", "pulse"],
+  order: CONFIG.weaponOrder,
   activeId: "rifle",
   unlocked: {
     rifle: true,
@@ -220,9 +173,9 @@ function ensureAudio() {
 
     const ambientOsc = audioCtx.createOscillator();
     ambientOsc.type = "triangle";
-    ambientOsc.frequency.value = 86;
+    ambientOsc.frequency.value = CONFIG.audio.ambientFreq;
     ambientGain = audioCtx.createGain();
-    ambientGain.gain.value = 0.02;
+    ambientGain.gain.value = CONFIG.audio.ambientBaseGain;
     ambientOsc.connect(ambientGain);
     ambientGain.connect(masterGain);
     ambientOsc.start();
@@ -236,8 +189,8 @@ function ensureAudio() {
 function updateAudioSettings() {
   if (!masterGain) return;
   const vol = gameState.settings.mute ? 0 : gameState.settings.volume;
-  masterGain.gain.value = vol * 0.6;
-  if (ambientGain) ambientGain.gain.value = 0.02 + vol * 0.03;
+  masterGain.gain.value = vol * CONFIG.audio.masterVolume;
+  if (ambientGain) ambientGain.gain.value = CONFIG.audio.ambientBaseGain + vol * CONFIG.audio.ambientVolumeScale;
 }
 
 function playTone(freq, duration = 0.12, type = "sine", volume = 0.2) {
@@ -261,6 +214,11 @@ function playTone(freq, duration = 0.12, type = "sine", volume = 0.2) {
   osc.stop(now + duration);
 }
 
+function playTonePreset(presetName) {
+  const t = CONFIG.audio.tones[presetName];
+  if (t) playTone(t.freq, t.duration, t.type, t.volume);
+}
+
 setScore(gameState.score);
 setHealth(gameState.health, gameState.maxHealth);
 setStamina(gameState.stamina, gameState.maxStamina);
@@ -270,8 +228,8 @@ setWeaponStatus("Rifle • Ready");
 setPauseMenuVisible(false);
 startObjective(1);
 
-function updateCombatStatus(elapsed) {
-  const cd = combatState.nextAttackAt - elapsed;
+function updateCombatStatus(gameTime) {
+  const cd = combatState.nextAttackAt - gameTime;
   if (cd <= 0) {
     setCombatStatus("Ready");
   } else {
@@ -284,7 +242,8 @@ function applyKillRewards(score, xp, weaponLabel) {
   addXp(xp);
   setScore(gameState.score);
   setStatus(`${weaponLabel}: downed enemy (+${score} score, +${xp} XP)`);
-  playTone(980, 0.12, "triangle", 0.12);
+  playTonePreset("kill");
+  events.emit("enemy-killed", { score, xp, weaponLabel });
 }
 
 function spawnPlayerProjectile(weapon, origin, direction) {
@@ -301,11 +260,17 @@ function spawnPlayerProjectile(weapon, origin, direction) {
     life: weapon.projectileLife || 1,
     damage: weapon.damage,
     weaponLabel: weapon.label,
-    hitTone: weapon.toneHit,
+    hitTone: weapon.toneImpact,
   });
 }
 
-function updatePlayerProjectiles(dt, elapsed) {
+function cleanupProjectile(p) {
+  p.mesh.geometry.dispose();
+  p.mesh.material.dispose();
+  scene.remove(p.mesh);
+}
+
+function updatePlayerProjectiles(dt, gameTime) {
   for (let i = playerProjectiles.length - 1; i >= 0; i--) {
     const p = playerProjectiles[i];
     p.life -= dt;
@@ -323,7 +288,7 @@ function updatePlayerProjectiles(dt, elapsed) {
         segment.normalize(),
         segmentLength + 0.1,
         p.damage,
-        elapsed
+        gameTime
       );
 
       if (attack.hit) {
@@ -333,7 +298,7 @@ function updatePlayerProjectiles(dt, elapsed) {
         } else {
           setStatus(`${p.weaponLabel}: hit confirmed.`);
         }
-        scene.remove(p.mesh);
+        cleanupProjectile(p);
         playerProjectiles.splice(i, 1);
         consumed = true;
       }
@@ -345,22 +310,22 @@ function updatePlayerProjectiles(dt, elapsed) {
     const hitGround = p.mesh.position.y <= groundY + 0.2;
 
     if (p.life <= 0 || hitGround) {
-      scene.remove(p.mesh);
+      cleanupProjectile(p);
       playerProjectiles.splice(i, 1);
     }
   }
 }
 
-function performAttack(elapsed) {
+function performAttack(gameTime) {
   if (gameState.paused) return;
   if (document.pointerLockElement !== canvas) {
     setStatus("Click the game to lock mouse before firing.");
     return;
   }
-  if (elapsed < combatState.nextAttackAt) return;
+  if (gameTime < combatState.nextAttackAt) return;
 
   const weapon = weaponDefs[weaponState.activeId] || weaponDefs.rifle;
-  combatState.nextAttackAt = elapsed + weapon.cooldown;
+  combatState.nextAttackAt = gameTime + weapon.cooldown;
   player.getAimOrigin(aimOrigin);
   player.getAimDirection(aimDirection);
   player.getMuzzleOrigin(muzzleOrigin);
@@ -380,12 +345,13 @@ function performAttack(elapsed) {
     spawnPlayerProjectile(weapon, muzzleOrigin, tempAimVector);
   }
 
-  playTone(weapon.toneMiss, 0.05, "triangle", 0.05);
+  playTone(weapon.toneShot, 0.05, "triangle", 0.05);
+  events.emit("weapon-fired", { weaponId: weapon.id });
 }
 
-function updateWeaponStatus(elapsed) {
+function updateWeaponStatus(gameTime) {
   const weapon = weaponDefs[weaponState.activeId] || weaponDefs.rifle;
-  const cd = combatState.nextAttackAt - elapsed;
+  const cd = combatState.nextAttackAt - gameTime;
   if (cd <= 0) {
     setWeaponStatus(`${weapon.label} • Ready`);
   } else {
@@ -397,7 +363,10 @@ function setActiveWeapon(nextId, announce = true) {
   if (!weaponDefs[nextId]) return;
   if (!weaponState.unlocked[nextId]) return;
   weaponState.activeId = nextId;
-  if (announce) setStatus(`Weapon switched: ${weaponDefs[nextId].label}`);
+  if (announce) {
+    setStatus(`Weapon switched: ${weaponDefs[nextId].label}`);
+    events.emit("weapon-switched", { weaponId: nextId });
+  }
 }
 
 function cycleWeapon() {
@@ -409,21 +378,27 @@ function cycleWeapon() {
 }
 
 function xpForLevel(level) {
-  return 70 + (level - 1) * 35;
+  return CONFIG.progression.baseXp + (level - 1) * CONFIG.progression.xpPerLevel;
 }
 
 function addXp(amount) {
   gameState.xp += amount;
   let leveled = false;
   while (gameState.xp >= xpForLevel(gameState.level)) {
+    if (gameState.level >= CONFIG.progression.maxLevel) {
+      gameState.xp = 0;
+      break;
+    }
     gameState.xp -= xpForLevel(gameState.level);
     gameState.level += 1;
     gameState.points += 1;
     leveled = true;
   }
   if (leveled) {
-    playTone(660, 0.2, "triangle", 0.14);
-    setStatus(`Level up! You are now level ${gameState.level}. Upgrade points: ${gameState.points}`);
+    playTonePreset("levelUp");
+    const maxNote = gameState.level >= CONFIG.progression.maxLevel ? " (MAX)" : "";
+    setStatus(`Level up! You are now level ${gameState.level}${maxNote}. Upgrade points: ${gameState.points}`);
+    events.emit("level-up", { level: gameState.level, points: gameState.points });
   }
   setProgression({ level: gameState.level, xp: gameState.xp, points: gameState.points });
 }
@@ -433,19 +408,20 @@ function applyUpgrade(slot) {
     setStatus("No upgrade points available.");
     return;
   }
+  const uv = CONFIG.progression.upgradeValues;
   gameState.points -= 1;
   if (slot === 1) {
     gameState.upgrades.speed += 1;
-    player.speed += 0.7;
-    player.sprintSpeed += 1.1;
+    player.speed += uv.speed.baseSpeed;
+    player.sprintSpeed += uv.speed.sprintSpeed;
     setStatus("Upgrade applied: Speed + Sprint.");
   } else if (slot === 2) {
     gameState.upgrades.jump += 1;
-    player.jumpPower += 0.55;
+    player.jumpPower += uv.jump.jumpPower;
     setStatus("Upgrade applied: Jump power.");
   } else {
     gameState.upgrades.stamina += 1;
-    gameState.maxStamina += 15;
+    gameState.maxStamina += uv.stamina.maxStamina;
     gameState.stamina = gameState.maxStamina;
     setStatus("Upgrade applied: Max stamina.");
   }
@@ -459,10 +435,12 @@ function setPaused(shouldPause) {
     document.exitPointerLock();
   }
   setStatus(shouldPause ? "Paused." : "Resumed.");
+  events.emit(shouldPause ? "game-paused" : "game-resumed");
 }
 
 function buildSaveState() {
   return {
+    version: 3,
     position: player.getPositionArray(),
     collectedIds: collectibles.getCollectedList(),
     enemies: enemies.getSaveState(),
@@ -510,7 +488,7 @@ function performLoad() {
   gameState.health = clamp(numberOr(data.health, gameState.maxHealth), 0, gameState.maxHealth);
   gameState.maxStamina = Math.max(1, numberOr(data.maxStamina, 100));
   gameState.stamina = clamp(numberOr(data.stamina, gameState.maxStamina), 0, gameState.maxStamina);
-  gameState.level = Math.max(1, numberOr(data.level, 1));
+  gameState.level = clamp(numberOr(data.level, 1), 1, CONFIG.progression.maxLevel);
   gameState.xp = Math.max(0, numberOr(data.xp, 0));
   gameState.points = Math.max(0, numberOr(data.points, 0));
 
@@ -521,27 +499,28 @@ function performLoad() {
     stamina: Math.max(0, numberOr(upgrades.stamina, 0)),
   };
 
-  player.speed = 8 + gameState.upgrades.speed * 0.7;
-  player.sprintSpeed = 13 + gameState.upgrades.speed * 1.1;
-  player.jumpPower = 9 + gameState.upgrades.jump * 0.55;
+  const uv = CONFIG.progression.upgradeValues;
+  player.speed = CONFIG.player.baseSpeed + gameState.upgrades.speed * uv.speed.baseSpeed;
+  player.sprintSpeed = CONFIG.player.baseSprintSpeed + gameState.upgrades.speed * uv.speed.sprintSpeed;
+  player.jumpPower = CONFIG.player.baseJumpPower + gameState.upgrades.jump * uv.jump.jumpPower;
 
   const loadedObjective = data.objective;
   if (loadedObjective) {
     objective.tier = Math.max(1, numberOr(loadedObjective.tier, 1));
-    objective.target = Math.max(1, numberOr(loadedObjective.target, 3));
-    objective.timeLimit = Math.max(10, numberOr(loadedObjective.timeLimit, 45));
+    objective.target = Math.max(1, numberOr(loadedObjective.target, CONFIG.objectives.baseTarget));
+    objective.timeLimit = Math.max(10, numberOr(loadedObjective.timeLimit, CONFIG.objectives.baseTimeLimit));
     objective.timeLeft = clamp(numberOr(loadedObjective.timeLeft, objective.timeLimit), 0, objective.timeLimit);
     objective.collected = Math.max(0, numberOr(loadedObjective.collected, 0));
-    objective.rewardScore = Math.max(1, numberOr(loadedObjective.rewardScore, 10));
-    objective.rewardXp = Math.max(1, numberOr(loadedObjective.rewardXp, 40));
+    objective.rewardScore = Math.max(1, numberOr(loadedObjective.rewardScore, CONFIG.objectives.baseRewardScore));
+    objective.rewardXp = Math.max(1, numberOr(loadedObjective.rewardXp, CONFIG.objectives.baseRewardXp));
   } else {
     startObjective(1);
   }
 
   const loadedSettings = data.settings || {};
   gameState.settings = {
-    sensitivity: clamp(numberOr(loadedSettings.sensitivity, 1), 0.4, 2.2),
-    volume: clamp(numberOr(loadedSettings.volume, 0.4), 0, 1),
+    sensitivity: clamp(numberOr(loadedSettings.sensitivity, CONFIG.settings.defaultSensitivity), CONFIG.settings.minSensitivity, CONFIG.settings.maxSensitivity),
+    volume: clamp(numberOr(loadedSettings.volume, CONFIG.settings.defaultVolume), 0, 1),
     mute: Boolean(loadedSettings.mute),
   };
   player.setLookSensitivity(gameState.settings.sensitivity);
@@ -568,7 +547,7 @@ function performLoad() {
   combatState.nextAttackAt = Math.max(0, numberOr(loadedCombat.nextAttackAt, 0));
 
   for (const projectile of playerProjectiles) {
-    scene.remove(projectile.mesh);
+    cleanupProjectile(projectile);
   }
   playerProjectiles.length = 0;
 
@@ -577,7 +556,7 @@ function performLoad() {
   setStamina(gameState.stamina, gameState.maxStamina);
   setProgression({ level: gameState.level, xp: gameState.xp, points: gameState.points });
   refreshObjectiveText();
-  updateWeaponStatus(clock.elapsedTime);
+  updateWeaponStatus(gameTime);
   setStatus("Game loaded.");
 }
 
@@ -619,12 +598,12 @@ canvas.addEventListener("contextmenu", (e) => {
 
 window.addEventListener("mousedown", (e) => {
   if (e.button !== 0) return;
-  performAttack(clock.elapsedTime);
+  performAttack(gameTime);
 });
 
 if (sensitivityInput) {
   sensitivityInput.addEventListener("input", (e) => {
-    gameState.settings.sensitivity = clamp(Number(e.target.value) || 1, 0.4, 2.2);
+    gameState.settings.sensitivity = clamp(Number(e.target.value) || CONFIG.settings.defaultSensitivity, CONFIG.settings.minSensitivity, CONFIG.settings.maxSensitivity);
     player.setLookSensitivity(gameState.settings.sensitivity);
   });
   player.setLookSensitivity(gameState.settings.sensitivity);
@@ -632,7 +611,7 @@ if (sensitivityInput) {
 
 if (volumeInput) {
   volumeInput.addEventListener("input", (e) => {
-    gameState.settings.volume = clamp(Number(e.target.value) || 0.4, 0, 1);
+    gameState.settings.volume = clamp(Number(e.target.value) || CONFIG.settings.defaultVolume, 0, 1);
     ensureAudio();
     updateAudioSettings();
   });
@@ -652,49 +631,60 @@ window.addEventListener("resize", () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-const clock = new THREE.Clock();
+// Custom game clock — only advances when unpaused, fixing the timer jump bug.
+let gameTime = 0;
+let wallTime = 0;
+let lastTimestamp = performance.now();
 
 function animate() {
-  const dt = Math.min(0.05, clock.getDelta());
-  const elapsed = clock.elapsedTime;
+  const now = performance.now();
+  const rawDt = (now - lastTimestamp) / 1000;
+  lastTimestamp = now;
+  const dt = Math.min(CONFIG.rendering.maxDeltaTime, rawDt);
 
-  world.updateDayNight(elapsed, sun, hemi);
+  wallTime += dt;
+  world.updateDayNight(wallTime, sun, hemi);
 
   if (!gameState.paused) {
+    gameTime += dt;
+
     const playerResult = player.update(dt);
 
-    updatePlayerProjectiles(dt, elapsed);
+    updatePlayerProjectiles(dt, gameTime);
 
     if (!playerResult.sprinting) {
-      const regen = playerResult.hasMoveInput ? 12 : 22;
+      const regen = playerResult.hasMoveInput ? CONFIG.player.staminaRegenMoving : CONFIG.player.staminaRegenIdle;
       gameState.stamina = clamp(gameState.stamina + regen * dt, 0, gameState.maxStamina);
     }
 
-    if (playerResult.landed && playerResult.fallSpeed > 13.5) {
-      const impact = Math.max(0, (playerResult.fallSpeed - 13.5) * 5.5);
+    if (playerResult.landed && playerResult.fallSpeed > CONFIG.player.fallDamageThreshold) {
+      const impact = Math.max(0, (playerResult.fallSpeed - CONFIG.player.fallDamageThreshold) * CONFIG.player.fallDamageMultiplier);
       gameState.health = clamp(gameState.health - impact, 0, gameState.maxHealth);
       setStatus(`Hard landing! -${Math.round(impact)} HP`);
-      playTone(150, 0.2, "sawtooth", 0.1);
+      playTonePreset("fallDamage");
+      events.emit("player-damaged", { amount: impact, source: "fall" });
     }
 
     const zoneDamage = world.getHazardDamageAt(player.position.x, player.position.z, dt);
     if (zoneDamage > 0) {
       gameState.health = clamp(gameState.health - zoneDamage, 0, gameState.maxHealth);
       if (Math.random() < 0.08) {
-        playTone(180, 0.08, "square", 0.06);
+        playTonePreset("hazardDamage");
       }
+      events.emit("player-damaged", { amount: zoneDamage, source: "hazard" });
     }
 
-    const enemyResult = enemies.update(dt, elapsed, player.position);
+    const enemyResult = enemies.update(dt, gameTime, player.position);
     if (enemyResult.playerDamage > 0) {
       gameState.health = clamp(gameState.health - enemyResult.playerDamage, 0, gameState.maxHealth);
       if (enemyResult.hitByProjectile) {
         setStatus(`Hit by projectile! -${Math.round(enemyResult.playerDamage)} HP`);
       }
-      playTone(165, 0.09, "square", 0.07);
+      playTonePreset("damage");
+      events.emit("player-damaged", { amount: enemyResult.playerDamage, source: enemyResult.hitByProjectile ? "projectile" : "melee" });
     }
 
-    const rewards = collectibles.update(elapsed, player.position);
+    const rewards = collectibles.update(gameTime, player.position);
     if (rewards.count > 0) {
       gameState.score += rewards.score;
       addXp(rewards.xp);
@@ -705,7 +695,8 @@ function animate() {
 
       setScore(gameState.score);
       setStatus(`Collected +${rewards.score} score, +${rewards.xp} XP`);
-      playTone(rewards.rareCount > 0 ? 820 : 520, 0.15, "triangle", 0.12);
+      playTonePreset(rewards.rareCount > 0 ? "collectRare" : "collect");
+      events.emit("item-collected", { score: rewards.score, xp: rewards.xp, count: rewards.count, heal: rewards.heal });
     }
 
     objective.timeLeft -= dt;
@@ -714,27 +705,30 @@ function animate() {
       addXp(objective.rewardXp);
       setScore(gameState.score);
       setStatus(`Objective complete! +${objective.rewardScore} score, +${objective.rewardXp} XP`);
-      playTone(930, 0.2, "triangle", 0.16);
+      playTonePreset("objectiveComplete");
+      events.emit("objective-complete", { tier: objective.tier, score: objective.rewardScore, xp: objective.rewardXp });
       startObjective(objective.tier + 1);
     } else if (objective.timeLeft <= 0) {
       setStatus("Objective failed. Restarting challenge.");
-      playTone(220, 0.25, "sawtooth", 0.12);
+      playTonePreset("objectiveFail");
+      events.emit("objective-failed", { tier: objective.tier });
       startObjective(Math.max(1, objective.tier));
     }
 
     if (gameState.health <= 0) {
       gameState.health = gameState.maxHealth;
       gameState.stamina = gameState.maxStamina;
-      player.setPosition(0, world.getHeightAt(0, 0) + 1.6, 0);
+      player.setPosition(0, world.getHeightAt(0, 0) + CONFIG.player.height, 0);
       setStatus("You were downed! Respawned at origin.");
-      playTone(120, 0.3, "square", 0.13);
+      playTonePreset("death");
+      events.emit("player-died");
     }
 
     setHealth(gameState.health, gameState.maxHealth);
     setStamina(gameState.stamina, gameState.maxStamina);
     refreshObjectiveText();
-    updateCombatStatus(elapsed);
-    updateWeaponStatus(elapsed);
+    updateCombatStatus(gameTime);
+    updateWeaponStatus(gameTime);
   }
 
   renderer.render(scene, camera);
