@@ -1,4 +1,5 @@
 import * as THREE from "https://unpkg.com/three@0.161.0/build/three.module.js";
+import { CONFIG } from "./config.js";
 
 export class PlayerController {
   constructor(camera, getHeightAt, options = {}) {
@@ -9,6 +10,7 @@ export class PlayerController {
     this.position = new THREE.Vector3(0, 6, 0);
     this.velocity = new THREE.Vector3();
     this.moveDir = new THREE.Vector3();
+    this.impulse = new THREE.Vector3();
 
     this.speed = 8;
     this.sprintSpeed = 13;
@@ -125,9 +127,14 @@ export class PlayerController {
     this.lookSensitivity = Math.max(0.2, Number(multiplier) || 1);
   }
 
+  addImpulse(vec) {
+    this.impulse.add(vec);
+  }
+
   setPosition(x, y, z) {
     this.position.set(x, y, z);
     this.velocity.set(0, 0, 0);
+    this.impulse.set(0, 0, 0);
     this.avatarRoot.position.copy(this.position);
   }
 
@@ -253,6 +260,15 @@ export class PlayerController {
     this.prevJumpDown = jumpDown;
 
     this.velocity.y -= this.gravity * dt;
+
+    // Apply external impulse (knockback, dash, etc.)
+    if (this.impulse.lengthSq() > 0.01) {
+      this.velocity.add(this.impulse);
+      this.impulse.multiplyScalar(Math.max(0, 1 - dt * 8));
+    } else {
+      this.impulse.set(0, 0, 0);
+    }
+
     this.position.addScaledVector(this.velocity, dt);
 
     const groundY = this.getHeightAt(this.position.x, this.position.z) + this.height;
@@ -267,7 +283,7 @@ export class PlayerController {
       this.onGround = true;
     }
 
-    const maxWorld = 107;
+    const maxWorld = CONFIG.world.maxWorld;
     this.position.x = Math.max(-maxWorld, Math.min(maxWorld, this.position.x));
     this.position.z = Math.max(-maxWorld, Math.min(maxWorld, this.position.z));
 

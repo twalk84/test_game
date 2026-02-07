@@ -14,6 +14,22 @@ export class EnemySystem {
     this.enemyMeshToId = new Map();
     this.projectiles = [];
     this.raycaster = new THREE.Raycaster();
+    this.difficultyMul = { health: 1, damage: 1, detection: 1 };
+  }
+
+  setDifficulty(diffKey) {
+    const d = CONFIG.difficulty[diffKey] || CONFIG.difficulty.normal;
+    this.difficultyMul = {
+      health: d.enemyHealthMul,
+      damage: d.enemyDamageMul,
+      detection: d.enemyDetectionMul,
+    };
+    // Update existing enemies' max health
+    for (const enemy of this.enemies) {
+      const baseCfg = ENEMY_TYPES[enemy.type];
+      enemy.maxHealth = Math.round(baseCfg.maxHealth * this.difficultyMul.health);
+      if (enemy.alive) enemy.health = Math.min(enemy.health, enemy.maxHealth);
+    }
   }
 
   _randomSpawnPosition() {
@@ -34,9 +50,22 @@ export class EnemySystem {
     }
   }
 
-  spawn(count = 12) {
+  spawn(count = 16) {
+    // Distribution: 35% bruiser, 25% shooter, 25% stalker, 15% tank
+    const typeThresholds = [
+      { max: 0.35, type: "bruiser" },
+      { max: 0.60, type: "shooter" },
+      { max: 0.85, type: "stalker" },
+      { max: 1.00, type: "tank" },
+    ];
+
     for (let i = 0; i < count; i++) {
-      const type = Math.random() < 0.7 ? "bruiser" : "shooter";
+      const roll = Math.random();
+      let type = "bruiser";
+      for (const t of typeThresholds) {
+        if (roll < t.max) { type = t.type; break; }
+      }
+
       const cfg = ENEMY_TYPES[type];
       const geometry = new THREE.CapsuleGeometry(cfg.size * 0.45, cfg.size * 0.75, 6, 10);
       const material = new THREE.MeshStandardMaterial({
@@ -52,12 +81,14 @@ export class EnemySystem {
       const spawnPos = this._randomSpawnPosition();
       mesh.position.copy(spawnPos).add(new THREE.Vector3(0, 0.9, 0));
 
+      const scaledHealth = Math.round(cfg.maxHealth * this.difficultyMul.health);
+
       const enemy = {
         id: `e_${i}`,
         type,
         mesh,
-        maxHealth: cfg.maxHealth,
-        health: cfg.maxHealth,
+        maxHealth: scaledHealth,
+        health: scaledHealth,
         state: "idle",
         isProvoked: false,
         alive: true,
@@ -69,6 +100,16 @@ export class EnemySystem {
         patrolDir: new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize(),
         hitFlashUntil: 0,
         strafeSign: Math.random() < 0.5 ? -1 : 1,
+        // Stalker-specific
+        dashCooldownAt: 0,
+        isDashing: false,
+        dashTimer: 0,
+        dashDir: new THREE.Vector3(),
+        // Tank-specific
+        chargeState: "none", // none, windup, charging, recovery
+        chargeTimer: 0,
+        chargeDir: new THREE.Vector3(),
+        chargeCooldownAt: 0,
       };
 
       this.enemies.push(enemy);
@@ -90,7 +131,6 @@ export class EnemySystem {
 
     if (enemy.health <= 0) {
       const cfg = ENEMY_TYPES[enemy.type];
-      // Start death animation instead of instant remove
       enemy.state = "dying";
       enemy.deathTimer = 0.3;
       enemy.respawnAt = time + cfg.respawnDelay;
@@ -108,8 +148,23 @@ export class EnemySystem {
     return { hit: true, killed: false, score: 0, xp: 0, type: enemy.type };
   }
 
+  applyAoeDamage(center, radius, damage, time) {
+    const results = [];
+    for (const enemy of this.enemies) {
+      if (!enemy.alive || enemy.state === "dying") continue;
+      const dx = enemy.mesh.position.x - center.x;
+      const dz = enemy.mesh.position.z - center.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > radius) continue;
+      const falloff = 1 - (dist / radius) * 0.5;
+      const result = this._applyDamage(enemy, damage * falloff, time);
+      if (result.hit) results.push(result);
+    }
+    return results;
+  }
+
   tryHitFromRay(origin, direction, maxDistance, damage, time) {
-    const aliveMeshes = this.enemies.filter((e) => e.alive).map((e) => e.mesh);
+    const aliveMeshes = this.enemies.filter((e) => e.alive && e.state !== "dying").map((e) => e.mesh);
     if (aliveMeshes.length === 0) return { hit: false, killed: false, score: 0, xp: 0, type: null };
 
     this.raycaster.set(origin, direction.clone().normalize());
@@ -158,7 +213,7 @@ export class EnemySystem {
       mesh,
       velocity: direction.multiplyScalar(cfg.projectileSpeed),
       life: 3,
-      damage: cfg.attackDamage,
+      damage: cfg.attackDamage * this.difficultyMul.damage,
     });
   }
 
@@ -168,6 +223,117 @@ export class EnemySystem {
     this.scene.remove(p.mesh);
   }
 
+  _updateStalker(enemy, cfg, dt, elapsed, toPlayer, dist, result) {
+    // Stalker: circles at range, periodically dashes in for quick melee, retreats
+    if (enemy.isDashing) {
+      enemy.dashTimer -= dt;
+      this._moveOnTerrain(enemy, enemy.dashDir.clone().multiplyScalar(cfg.dashSpeed), dt);
+      if (enemy.dashTimer <= 0) {
+        enemy.isDashing = false;
+        enemy.dashCooldownAt = elapsed + cfg.dashCooldown;
+      }
+      // Melee while dashing through player
+      if (dist <= cfg.attackRange && elapsed >= enemy.nextAttackAt) {
+        enemy.nextAttackAt = elapsed + cfg.attackCooldown;
+        result.playerDamage += cfg.attackDamage * this.difficultyMul.damage;
+        enemy.state = "attack";
+      }
+      return;
+    }
+
+    const move = new THREE.Vector3();
+
+    if (dist < cfg.circleRange - 1) {
+      // Too close — back away
+      move.add(toPlayer.clone().normalize().multiplyScalar(-cfg.speed));
+    } else if (dist > cfg.circleRange + 2) {
+      // Too far — approach
+      move.add(toPlayer.clone().normalize().multiplyScalar(cfg.speed));
+    }
+
+    // Strafe around player
+    const strafe = new THREE.Vector3(-toPlayer.z, 0, toPlayer.x)
+      .normalize()
+      .multiplyScalar(cfg.speed * 0.7 * enemy.strafeSign);
+    move.add(strafe);
+
+    if (move.lengthSq() > 0.0001) {
+      this._moveOnTerrain(enemy, move.normalize().multiplyScalar(cfg.speed), dt);
+    }
+
+    // Dash attack when ready and within striking distance
+    if (elapsed >= enemy.dashCooldownAt && dist < cfg.circleRange + 4 && dist > cfg.attackRange) {
+      enemy.isDashing = true;
+      enemy.dashTimer = cfg.dashDuration;
+      enemy.dashDir.copy(toPlayer).normalize();
+      enemy.state = "dash";
+    }
+  }
+
+  _updateTank(enemy, cfg, dt, elapsed, toPlayer, dist, result) {
+    // Tank charge state machine
+    if (enemy.chargeState === "windup") {
+      enemy.chargeTimer -= dt;
+      // Pulsing glow during windup
+      enemy.mesh.material.emissiveIntensity = 1.5 + Math.sin(elapsed * 15) * 0.5;
+      if (enemy.chargeTimer <= 0) {
+        enemy.chargeState = "charging";
+        enemy.chargeTimer = cfg.chargeDuration;
+        enemy.chargeDir.copy(toPlayer).normalize();
+      }
+      return;
+    }
+
+    if (enemy.chargeState === "charging") {
+      enemy.chargeTimer -= dt;
+      this._moveOnTerrain(enemy, enemy.chargeDir.clone().multiplyScalar(cfg.chargeSpeed), dt);
+
+      // Hit player during charge
+      if (dist <= cfg.attackRange * 1.5 && elapsed >= enemy.nextAttackAt) {
+        enemy.nextAttackAt = elapsed + cfg.attackCooldown;
+        result.playerDamage += cfg.attackDamage * this.difficultyMul.damage;
+        result.knockback = enemy.chargeDir.clone().multiplyScalar(cfg.chargeKnockback);
+        result.knockback.y = 4;
+        enemy.state = "attack";
+      }
+
+      if (enemy.chargeTimer <= 0) {
+        enemy.chargeState = "recovery";
+        enemy.chargeTimer = cfg.chargeRecovery;
+        enemy.mesh.material.emissiveIntensity = 1;
+      }
+      return;
+    }
+
+    if (enemy.chargeState === "recovery") {
+      enemy.chargeTimer -= dt;
+      if (enemy.chargeTimer <= 0) {
+        enemy.chargeState = "none";
+        enemy.chargeCooldownAt = elapsed + cfg.chargeCooldown;
+      }
+      return;
+    }
+
+    // Normal tank behavior — approach slowly
+    if (dist > cfg.attackRange * 0.9) {
+      this._moveOnTerrain(enemy, toPlayer.normalize().multiplyScalar(cfg.speed), dt);
+    }
+
+    // Regular melee attack
+    if (dist <= cfg.attackRange && elapsed >= enemy.nextAttackAt) {
+      enemy.nextAttackAt = elapsed + cfg.attackCooldown;
+      result.playerDamage += cfg.attackDamage * this.difficultyMul.damage;
+      enemy.state = "attack";
+    }
+
+    // Start charge when ready and at medium range
+    if (enemy.chargeState === "none" && elapsed >= enemy.chargeCooldownAt && dist > 5 && dist < cfg.detectionRange) {
+      enemy.chargeState = "windup";
+      enemy.chargeTimer = cfg.chargeWindup;
+      enemy.state = "windup";
+    }
+  }
+
   update(dt, elapsed, playerPos) {
     const result = {
       playerDamage: 0,
@@ -175,6 +341,7 @@ export class EnemySystem {
       score: 0,
       xp: 0,
       hitByProjectile: false,
+      knockback: null,
     };
 
     for (const enemy of this.enemies) {
@@ -197,11 +364,15 @@ export class EnemySystem {
 
       if (!enemy.alive) {
         if (enemy.respawnAt > 0 && elapsed >= enemy.respawnAt) {
-          enemy.health = enemy.maxHealth;
+          const scaledHealth = Math.round(cfg.maxHealth * this.difficultyMul.health);
+          enemy.maxHealth = scaledHealth;
+          enemy.health = scaledHealth;
           enemy.respawnAt = 0;
           enemy.state = "idle";
           enemy.isProvoked = false;
           enemy.aggroUntil = 0;
+          enemy.chargeState = "none";
+          enemy.isDashing = false;
           enemy.spawnPos = this._randomSpawnPosition();
           enemy.mesh.position.copy(enemy.spawnPos).add(new THREE.Vector3(0, 0.9, 0));
           this._setEnemyAlive(enemy, true);
@@ -212,6 +383,8 @@ export class EnemySystem {
       const toPlayer = playerPos.clone().sub(enemy.mesh.position);
       toPlayer.y = 0;
       const dist = toPlayer.length();
+      const detectionRange = cfg.detectionRange * this.difficultyMul.detection;
+
       if (!enemy.isProvoked) {
         enemy.state = "patrol";
         enemy.patrolTimer -= dt;
@@ -225,7 +398,7 @@ export class EnemySystem {
         continue;
       }
 
-      const hasAggro = dist < cfg.detectionRange || elapsed < enemy.aggroUntil;
+      const hasAggro = dist < detectionRange || elapsed < enemy.aggroUntil;
 
       if (!hasAggro) {
         enemy.state = "patrol";
@@ -249,10 +422,10 @@ export class EnemySystem {
         }
         if (dist <= cfg.attackRange && elapsed >= enemy.nextAttackAt) {
           enemy.nextAttackAt = elapsed + cfg.attackCooldown;
-          result.playerDamage += cfg.attackDamage;
+          result.playerDamage += cfg.attackDamage * this.difficultyMul.damage;
           enemy.state = "attack";
         }
-      } else {
+      } else if (enemy.type === "shooter") {
         const move = new THREE.Vector3();
         const preferred = cfg.preferredRange;
 
@@ -273,6 +446,10 @@ export class EnemySystem {
           enemy.state = "attack";
           this._spawnProjectile(enemy, playerPos);
         }
+      } else if (enemy.type === "stalker") {
+        this._updateStalker(enemy, cfg, dt, elapsed, toPlayer, dist, result);
+      } else if (enemy.type === "tank") {
+        this._updateTank(enemy, cfg, dt, elapsed, toPlayer, dist, result);
       }
     }
 

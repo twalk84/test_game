@@ -18,12 +18,15 @@
     <div class="row">Objective: <span id="objective">Collect 3 crystals in 45s</span></div>
     <div class="row">Weapon: <span id="weaponStatus">Rifle • Ready</span></div>
     <div class="row">Combat: <span id="combatStatus">Ready</span></div>
+    <div class="row">Abilities: <span id="abilityStatus">Dash:RDY | Heal:RDY | Shockwave:RDY</span></div>
+    <div class="row"><span id="buffStatus"></span></div>
     <div class="row hint">Click game to lock mouse</div>
     <div class="row hint">WASD move, Space jump, Shift sprint</div>
     <div class="row hint">Hold RMB to aim camera, V to swap shoulder</div>
-    <div class="row hint">LMB attack, Q cycle weapon (Rifle / Shotgun / Pulse)</div>
+    <div class="row hint">LMB attack, Q cycle weapon</div>
+    <div class="row hint">E dash, F heal, C shockwave</div>
     <div class="row hint">K save, L load, R reset save, P pause</div>
-    <div class="row hint">1/2/3 spend upgrade points</div>
+    <div class="row hint">4/5 spend upgrade points (speed/jump/stamina: 1/2/3)</div>
     <div class="row status" id="status">Ready.</div>
   </div>
 
@@ -37,6 +40,14 @@
     </label>
     <label class="setting checkbox">
       <input id="mute" type="checkbox" /> Mute Audio
+    </label>
+    <label class="setting">Difficulty
+      <select id="difficulty">
+        <option value="easy">Easy</option>
+        <option value="normal" selected>Normal</option>
+        <option value="hard">Hard</option>
+        <option value="nightmare">Nightmare</option>
+      </select>
     </label>
     <div class="hint">Press P to resume</div>
   </div>

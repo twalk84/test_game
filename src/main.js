@@ -8,7 +8,11 @@ import { CollectibleSystem } from "./collectibles.js";
 import { EnemySystem } from "./enemies.js";
 import { loadGame, resetSave, saveGame } from "./save.js";
 import { ParticleSystem } from "./particles.js";
+import { AbilitySystem } from "./abilities.js";
+import { LootSystem } from "./loot.js";
 import {
+  setAbilityStatus,
+  setBuffStatus,
   setCombatStatus,
   setHealth,
   setObjective,
@@ -24,6 +28,7 @@ const canvas = document.getElementById("game");
 const sensitivityInput = document.getElementById("sensitivity");
 const volumeInput = document.getElementById("volume");
 const muteInput = document.getElementById("mute");
+const difficultySelect = document.getElementById("difficulty");
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, CONFIG.rendering.maxPixelRatio));
@@ -59,6 +64,8 @@ scene.add(sun);
 
 const world = createWorld(scene);
 const particles = new ParticleSystem(scene);
+const abilities = new AbilitySystem();
+const loot = new LootSystem(scene, world.getHeightAt);
 
 const gameState = {
   score: 0,
@@ -75,11 +82,18 @@ const gameState = {
     stamina: 0,
   },
   paused: false,
+  difficulty: "normal",
   settings: {
     sensitivity: CONFIG.settings.defaultSensitivity,
     volume: CONFIG.settings.defaultVolume,
     mute: CONFIG.settings.defaultMute,
   },
+};
+
+// Active buffs from loot
+const buffs = {
+  damage: { active: false, multiplier: 1, expiresAt: 0 },
+  speed: { active: false, multiplier: 1, expiresAt: 0 },
 };
 
 const objective = {
@@ -132,7 +146,7 @@ const collectibles = new CollectibleSystem(scene, world.getHeightAt, CONFIG.worl
 collectibles.spawn(CONFIG.collectibles.spawnCount);
 
 const enemies = new EnemySystem(scene, world.getHeightAt, CONFIG.world.size);
-enemies.spawn(12);
+enemies.spawn(16);
 
 const combatState = {
   nextAttackAt: 0,
@@ -147,6 +161,8 @@ const weaponState = {
     rifle: true,
     shotgun: true,
     pulse: true,
+    sniper: true,
+    grenade: true,
   },
 };
 
@@ -256,15 +272,21 @@ function spawnPlayerProjectile(weapon, origin, direction) {
   mesh.position.copy(origin);
   scene.add(mesh);
 
+  const vel = direction.clone().normalize().multiplyScalar(weapon.projectileSpeed || 48);
+
   playerProjectiles.push({
     mesh,
-    velocity: direction.clone().normalize().multiplyScalar(weapon.projectileSpeed || 48),
+    velocity: vel,
     life: weapon.projectileLife || 1,
-    damage: weapon.damage,
+    damage: weapon.damage * (buffs.damage.active ? buffs.damage.multiplier : 1),
     weaponLabel: weapon.label,
     hitTone: weapon.toneImpact,
     trailColor: weapon.projectileColor || 0xffffff,
     trailCounter: 0,
+    isGrenade: weapon.isGrenade || false,
+    grenadeGravity: weapon.grenadeGravity || 0,
+    explosionRadius: weapon.explosionRadius || 0,
+    splashDamage: (weapon.splashDamage || 0) * (buffs.damage.active ? buffs.damage.multiplier : 1),
   });
 }
 
@@ -274,12 +296,34 @@ function cleanupProjectile(p) {
   scene.remove(p.mesh);
 }
 
+function handleGrenadeExplosion(p, gameTime) {
+  const pos = p.mesh.position.clone();
+  particles.enemyDeath(pos, 0xff6622);
+  playTonePreset("explosion");
+
+  const results = enemies.applyAoeDamage(pos, p.explosionRadius, p.splashDamage, gameTime);
+
+  for (const r of results) {
+    if (r.killed) {
+      if (r.deathPos) particles.enemyDeath(r.deathPos, r.deathColor);
+      applyKillRewards(r.score, r.xp, p.weaponLabel);
+      loot.tryDrop(r.deathPos, gameTime);
+    }
+  }
+}
+
 function updatePlayerProjectiles(dt, gameTime) {
   for (let i = playerProjectiles.length - 1; i >= 0; i--) {
     const p = playerProjectiles[i];
     p.life -= dt;
 
     previousProjectilePosition.copy(p.mesh.position);
+
+    // Apply gravity for grenades
+    if (p.isGrenade && p.grenadeGravity > 0) {
+      p.velocity.y -= p.grenadeGravity * dt;
+    }
+
     p.mesh.position.addScaledVector(p.velocity, dt);
 
     // Projectile trail (every other frame)
@@ -302,13 +346,18 @@ function updatePlayerProjectiles(dt, gameTime) {
       );
 
       if (attack.hit) {
-        playTone(p.hitTone || 760, 0.06, "square", 0.09);
-        particles.bulletImpact(p.mesh.position, p.trailColor);
-        if (attack.killed) {
-          if (attack.deathPos) particles.enemyDeath(attack.deathPos, attack.deathColor);
-          applyKillRewards(attack.score, attack.xp, p.weaponLabel);
+        if (p.isGrenade) {
+          handleGrenadeExplosion(p, gameTime);
         } else {
-          setStatus(`${p.weaponLabel}: hit confirmed.`);
+          playTone(p.hitTone || 760, 0.06, "square", 0.09);
+          particles.bulletImpact(p.mesh.position, p.trailColor);
+          if (attack.killed) {
+            if (attack.deathPos) particles.enemyDeath(attack.deathPos, attack.deathColor);
+            applyKillRewards(attack.score, attack.xp, p.weaponLabel);
+            loot.tryDrop(attack.deathPos, gameTime);
+          } else {
+            setStatus(`${p.weaponLabel}: hit confirmed.`);
+          }
         }
         cleanupProjectile(p);
         playerProjectiles.splice(i, 1);
@@ -322,6 +371,9 @@ function updatePlayerProjectiles(dt, gameTime) {
     const hitGround = p.mesh.position.y <= groundY + 0.2;
 
     if (p.life <= 0 || hitGround) {
+      if (p.isGrenade) {
+        handleGrenadeExplosion(p, gameTime);
+      }
       cleanupProjectile(p);
       playerProjectiles.splice(i, 1);
     }
@@ -444,6 +496,59 @@ function applyUpgrade(slot) {
   setProgression({ level: gameState.level, xp: gameState.xp, points: gameState.points });
 }
 
+function setDifficulty(key) {
+  gameState.difficulty = key;
+  enemies.setDifficulty(key);
+  if (difficultySelect) difficultySelect.value = key;
+  setStatus(`Difficulty set to ${CONFIG.difficulty[key]?.label || key}.`);
+}
+
+function updateBuffs(gameTime) {
+  const parts = [];
+  if (buffs.damage.active) {
+    if (gameTime >= buffs.damage.expiresAt) {
+      buffs.damage.active = false;
+      buffs.damage.multiplier = 1;
+    } else {
+      parts.push(`DMG x${buffs.damage.multiplier.toFixed(1)} (${Math.ceil(buffs.damage.expiresAt - gameTime)}s)`);
+    }
+  }
+  if (buffs.speed.active) {
+    if (gameTime >= buffs.speed.expiresAt) {
+      buffs.speed.active = false;
+      buffs.speed.multiplier = 1;
+      player.speed = CONFIG.player.baseSpeed + gameState.upgrades.speed * CONFIG.progression.upgradeValues.speed.baseSpeed;
+      player.sprintSpeed = CONFIG.player.baseSprintSpeed + gameState.upgrades.speed * CONFIG.progression.upgradeValues.speed.sprintSpeed;
+    } else {
+      parts.push(`SPD x${buffs.speed.multiplier.toFixed(1)} (${Math.ceil(buffs.speed.expiresAt - gameTime)}s)`);
+    }
+  }
+  setBuffStatus(parts.join(" | "));
+}
+
+function applyLootPickup(pickup, gameTime) {
+  const cfg = pickup.config;
+  if (pickup.type === "health") {
+    gameState.health = clamp(gameState.health + cfg.heal, 0, gameState.maxHealth);
+    setStatus(`Picked up health pack! +${cfg.heal} HP`);
+  } else if (pickup.type === "damageBuff") {
+    buffs.damage.active = true;
+    buffs.damage.multiplier = cfg.multiplier;
+    buffs.damage.expiresAt = gameTime + cfg.duration;
+    setStatus(`Damage boost! x${cfg.multiplier} for ${cfg.duration}s`);
+  } else if (pickup.type === "speedBuff") {
+    buffs.speed.active = true;
+    buffs.speed.multiplier = cfg.multiplier;
+    buffs.speed.expiresAt = gameTime + cfg.duration;
+    const uv = CONFIG.progression.upgradeValues;
+    player.speed = (CONFIG.player.baseSpeed + gameState.upgrades.speed * uv.speed.baseSpeed) * cfg.multiplier;
+    player.sprintSpeed = (CONFIG.player.baseSprintSpeed + gameState.upgrades.speed * uv.speed.sprintSpeed) * cfg.multiplier;
+    setStatus(`Speed boost! x${cfg.multiplier} for ${cfg.duration}s`);
+  }
+  playTonePreset("lootPickup");
+  particles.collectPickup(player.position, cfg.color);
+}
+
 function setPaused(shouldPause) {
   gameState.paused = shouldPause;
   setPauseMenuVisible(shouldPause);
@@ -474,10 +579,12 @@ function buildSaveState() {
       nextAttackAt: combatState.nextAttackAt,
     },
     settings: gameState.settings,
+    difficulty: gameState.difficulty,
     weapons: {
       activeId: weaponState.activeId,
       unlocked: weaponState.unlocked,
     },
+    abilities: abilities.getSaveState(),
   };
 }
 
@@ -546,12 +653,18 @@ function performLoad() {
   ensureAudio();
   updateAudioSettings();
 
+  if (data.difficulty && CONFIG.difficulty[data.difficulty]) {
+    setDifficulty(data.difficulty);
+  }
+
   const loadedWeapons = data.weapons || {};
   const loadedUnlocked = loadedWeapons.unlocked || {};
   weaponState.unlocked = {
     rifle: loadedUnlocked.rifle !== false,
     shotgun: loadedUnlocked.shotgun !== false,
     pulse: loadedUnlocked.pulse !== false,
+    sniper: loadedUnlocked.sniper !== false,
+    grenade: loadedUnlocked.grenade !== false,
   };
   const loadedActive = typeof loadedWeapons.activeId === "string" ? loadedWeapons.activeId : "rifle";
   setActiveWeapon(loadedActive, false);
@@ -562,10 +675,19 @@ function performLoad() {
   const loadedCombat = data.combat || {};
   combatState.nextAttackAt = Math.max(0, numberOr(loadedCombat.nextAttackAt, 0));
 
+  abilities.applySaveState(data.abilities, gameTime);
+
+  // Reset buffs on load
+  buffs.damage.active = false;
+  buffs.damage.multiplier = 1;
+  buffs.speed.active = false;
+  buffs.speed.multiplier = 1;
+
   for (const projectile of playerProjectiles) {
     cleanupProjectile(projectile);
   }
   playerProjectiles.length = 0;
+  loot.cleanup();
 
   setScore(gameState.score);
   setHealth(gameState.health, gameState.maxHealth);
@@ -582,6 +704,8 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
+  if (gameState.paused) return;
+
   if (e.code === "KeyK") {
     performSave();
   } else if (e.code === "KeyL") {
@@ -597,6 +721,35 @@ window.addEventListener("keydown", (e) => {
     applyUpgrade(2);
   } else if (e.code === "Digit3") {
     applyUpgrade(3);
+  } else if (e.code === CONFIG.abilities.dash.key) {
+    if (abilities.tryDash(gameTime, player)) {
+      playTonePreset("dash");
+      setStatus("Dash!");
+      particles.muzzleFlash(player.position, new THREE.Vector3(0, 1, 0));
+    }
+  } else if (e.code === CONFIG.abilities.healPulse.key) {
+    if (abilities.tryHealPulse(gameTime)) {
+      playTonePreset("heal");
+      setStatus("Heal pulse activated!");
+      particles.collectPickup(player.position, 0x44ff44);
+    }
+  } else if (e.code === CONFIG.abilities.shockwave.key) {
+    const shockCfg = CONFIG.abilities.shockwave;
+    const shockResult = abilities.tryShockwave(gameTime, player.position, enemies.enemies);
+    if (shockResult) {
+      playTonePreset("shockwave");
+      setStatus(`Shockwave! Hit ${shockResult.hit} enemies.`);
+      particles.levelUp(player.position);
+      // Apply actual damage through enemy system
+      const aoeResults = enemies.applyAoeDamage(player.position, shockCfg.radius, shockCfg.damage, gameTime);
+      for (const r of aoeResults) {
+        if (r.killed) {
+          if (r.deathPos) particles.enemyDeath(r.deathPos, r.deathColor);
+          applyKillRewards(r.score, r.xp, "Shockwave");
+          loot.tryDrop(r.deathPos, gameTime);
+        }
+      }
+    }
   }
 });
 
@@ -641,6 +794,12 @@ if (muteInput) {
   });
 }
 
+if (difficultySelect) {
+  difficultySelect.addEventListener("change", (e) => {
+    setDifficulty(e.target.value);
+  });
+}
+
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
@@ -674,15 +833,17 @@ function animate() {
     }
 
     if (playerResult.landed && playerResult.fallSpeed > CONFIG.player.fallDamageThreshold) {
-      const impact = Math.max(0, (playerResult.fallSpeed - CONFIG.player.fallDamageThreshold) * CONFIG.player.fallDamageMultiplier);
-      gameState.health = clamp(gameState.health - impact, 0, gameState.maxHealth);
-      setStatus(`Hard landing! -${Math.round(impact)} HP`);
-      playTonePreset("fallDamage");
-      events.emit("player-damaged", { amount: impact, source: "fall" });
+      if (!abilities.isInvulnerable(gameTime)) {
+        const impact = Math.max(0, (playerResult.fallSpeed - CONFIG.player.fallDamageThreshold) * CONFIG.player.fallDamageMultiplier);
+        gameState.health = clamp(gameState.health - impact, 0, gameState.maxHealth);
+        setStatus(`Hard landing! -${Math.round(impact)} HP`);
+        playTonePreset("fallDamage");
+        events.emit("player-damaged", { amount: impact, source: "fall" });
+      }
     }
 
     const zoneDamage = world.getHazardDamageAt(player.position.x, player.position.z, dt);
-    if (zoneDamage > 0) {
+    if (zoneDamage > 0 && !abilities.isInvulnerable(gameTime)) {
       gameState.health = clamp(gameState.health - zoneDamage, 0, gameState.maxHealth);
       if (Math.random() < 0.08) {
         playTonePreset("hazardDamage");
@@ -691,7 +852,7 @@ function animate() {
     }
 
     const enemyResult = enemies.update(dt, gameTime, player.position);
-    if (enemyResult.playerDamage > 0) {
+    if (enemyResult.playerDamage > 0 && !abilities.isInvulnerable(gameTime)) {
       gameState.health = clamp(gameState.health - enemyResult.playerDamage, 0, gameState.maxHealth);
       if (enemyResult.hitByProjectile) {
         setStatus(`Hit by projectile! -${Math.round(enemyResult.playerDamage)} HP`);
@@ -699,6 +860,26 @@ function animate() {
       playTonePreset("damage");
       events.emit("player-damaged", { amount: enemyResult.playerDamage, source: enemyResult.hitByProjectile ? "projectile" : "melee" });
     }
+
+    // Apply tank knockback
+    if (enemyResult.knockback) {
+      player.addImpulse(enemyResult.knockback);
+    }
+
+    // Abilities update
+    const abilityResult = abilities.update(dt);
+    if (abilityResult.healApplied > 0) {
+      gameState.health = clamp(gameState.health + abilityResult.healApplied, 0, gameState.maxHealth);
+    }
+
+    // Loot pickup check
+    const lootResult = loot.update(gameTime, player.position);
+    if (lootResult.pickedUp) {
+      applyLootPickup(lootResult.pickedUp, gameTime);
+    }
+
+    // Buff expiry
+    updateBuffs(gameTime);
 
     const rewards = collectibles.update(gameTime, player.position);
     if (rewards.count > 0) {
@@ -738,6 +919,11 @@ function animate() {
       setStatus("You were downed! Respawned at origin.");
       playTonePreset("death");
       events.emit("player-died");
+      loot.cleanup();
+      buffs.damage.active = false;
+      buffs.damage.multiplier = 1;
+      buffs.speed.active = false;
+      buffs.speed.multiplier = 1;
     }
 
     setHealth(gameState.health, gameState.maxHealth);
@@ -745,6 +931,7 @@ function animate() {
     refreshObjectiveText();
     updateCombatStatus(gameTime);
     updateWeaponStatus(gameTime);
+    setAbilityStatus(abilities.getCooldownInfo(gameTime));
   }
 
   particles.update(dt);
@@ -761,5 +948,5 @@ events.on("level-up", () => {
   particles.levelUp(player.position);
 });
 
-setStatus("Explore, survive, fight enemies. LMB attack. 1/2/3 spend upgrade points.");
+setStatus("Explore, survive, fight. LMB attack, Q weapon, E dash, F heal, C shockwave.");
 animate();

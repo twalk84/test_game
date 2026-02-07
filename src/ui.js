@@ -48,6 +48,25 @@ export function setWeaponStatus(text) {
   if (weaponEl) weaponEl.textContent = text;
 }
 
+export function setAbilityStatus(cooldowns) {
+  const el = document.getElementById("abilityStatus");
+  if (!el) return;
+  const parts = [];
+  for (const [, info] of Object.entries(cooldowns)) {
+    if (info.ready) {
+      parts.push(`${info.label}:RDY`);
+    } else {
+      parts.push(`${info.label}:${info.remaining.toFixed(1)}s`);
+    }
+  }
+  el.textContent = parts.join(" | ");
+}
+
+export function setBuffStatus(text) {
+  const el = document.getElementById("buffStatus");
+  if (el) el.textContent = text;
+}
+
 export function setPauseMenuVisible(visible) {
   const menu = document.getElementById("pauseMenu");
   if (!menu) return;
