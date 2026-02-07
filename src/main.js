@@ -4,9 +4,13 @@ import { PlayerController } from "./player.js";
 import { CollectibleSystem } from "./collectibles.js";
 import { EnemySystem } from "./enemies.js";
 import { loadGame, resetSave, saveGame } from "./save.js";
+import { MissionSystem } from "./systems/missions.js";
+import { InventorySystem } from "./systems/inventory.js";
 import {
   setCombatStatus,
   setHealth,
+  setInventoryPanelVisible,
+  setInventorySummary,
   setObjective,
   setPauseMenuVisible,
   setProgression,
@@ -39,14 +43,8 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87b8eb);
 
-const camera = new THREE.PerspectiveCamera(
-  70,
-  window.innerWidth / window.innerHeight,
-  0.1,
-  500
-);
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 500);
 
-// Lighting
 const hemi = new THREE.HemisphereLight(0xbfdfff, 0x35573a, 0.7);
 scene.add(hemi);
 
@@ -79,6 +77,7 @@ const gameState = {
     stamina: 0,
   },
   paused: false,
+  inventoryPanelOpen: false,
   settings: {
     sensitivity: 1,
     volume: 0.4,
@@ -86,32 +85,8 @@ const gameState = {
   },
 };
 
-const objective = {
-  tier: 1,
-  target: 3,
-  timeLimit: 45,
-  timeLeft: 45,
-  collected: 0,
-  rewardScore: 10,
-  rewardXp: 40,
-};
-
-function refreshObjectiveText() {
-  setObjective(
-    `Collect ${objective.target} crystals in ${Math.ceil(objective.timeLeft)}s (${objective.collected}/${objective.target})`
-  );
-}
-
-function startObjective(nextTier = objective.tier) {
-  objective.tier = nextTier;
-  objective.target = 3 + (nextTier - 1);
-  objective.timeLimit = Math.max(24, 45 - (nextTier - 1) * 2);
-  objective.timeLeft = objective.timeLimit;
-  objective.collected = 0;
-  objective.rewardScore = 10 + nextTier * 5;
-  objective.rewardXp = 40 + nextTier * 14;
-  refreshObjectiveText();
-}
+const missionSystem = new MissionSystem();
+const inventorySystem = new InventorySystem();
 
 const player = new PlayerController(camera, world.getHeightAt, {
   scene,
@@ -139,6 +114,7 @@ enemies.spawn(12);
 
 const combatState = {
   nextAttackAt: 0,
+  nightRushAnnounced: false,
 };
 
 const weaponDefs = {
@@ -261,6 +237,33 @@ function playTone(freq, duration = 0.12, type = "sine", volume = 0.2) {
   osc.stop(now + duration);
 }
 
+function updateInventoryUI() {
+  setInventorySummary(inventorySystem.getSummaryText());
+  const scrap = document.getElementById("invScrap");
+  const crystal = document.getElementById("invCrystal");
+  const medkit = document.getElementById("invMedkit");
+  if (scrap) scrap.textContent = String(inventorySystem.resources.scrap);
+  if (crystal) crystal.textContent = String(inventorySystem.resources.crystal);
+  if (medkit) medkit.textContent = String(inventorySystem.consumables.medkit);
+}
+
+function applyMissionResult(missionResult) {
+  if (!missionResult) return;
+
+  setObjective(missionResult.objectiveText || missionSystem.getObjectiveText());
+
+  if (missionResult.state === "completed") {
+    gameState.score += missionResult.reward.score;
+    addXp(missionResult.reward.xp);
+    setScore(gameState.score);
+    setStatus(missionResult.message);
+    playTone(930, 0.2, "triangle", 0.16);
+  } else if (missionResult.state === "failed") {
+    setStatus(missionResult.message);
+    playTone(220, 0.25, "sawtooth", 0.12);
+  }
+}
+
 setScore(gameState.score);
 setHealth(gameState.health, gameState.maxHealth);
 setStamina(gameState.stamina, gameState.maxStamina);
@@ -268,7 +271,9 @@ setProgression({ level: gameState.level, xp: gameState.xp, points: gameState.poi
 setCombatStatus("Ready");
 setWeaponStatus("Rifle • Ready");
 setPauseMenuVisible(false);
-startObjective(1);
+setInventoryPanelVisible(false);
+setObjective(missionSystem.getObjectiveText());
+updateInventoryUI();
 
 function updateCombatStatus(elapsed) {
   const cd = combatState.nextAttackAt - elapsed;
@@ -279,11 +284,22 @@ function updateCombatStatus(elapsed) {
   }
 }
 
-function applyKillRewards(score, xp, weaponLabel) {
+function applyKillRewards(score, xp, weaponLabel, enemyType) {
   gameState.score += score;
   addXp(xp);
+  missionSystem.onEvent("enemy_killed", { count: 1, type: enemyType });
+
+  if (enemyType === "sniper") {
+    inventorySystem.addResource("crystal", 1);
+  } else if (enemyType === "charger") {
+    inventorySystem.addResource("scrap", 2);
+  } else {
+    inventorySystem.addResource("scrap", 1);
+  }
+
   setScore(gameState.score);
-  setStatus(`${weaponLabel}: downed enemy (+${score} score, +${xp} XP)`);
+  updateInventoryUI();
+  setStatus(`${weaponLabel}: downed ${enemyType || "enemy"} (+${score} score, +${xp} XP)`);
   playTone(980, 0.12, "triangle", 0.12);
 }
 
@@ -329,7 +345,7 @@ function updatePlayerProjectiles(dt, elapsed) {
       if (attack.hit) {
         playTone(p.hitTone || 760, 0.06, "square", 0.09);
         if (attack.killed) {
-          applyKillRewards(attack.score, attack.xp, p.weaponLabel);
+          applyKillRewards(attack.score, attack.xp, p.weaponLabel, attack.type);
         } else {
           setStatus(`${p.weaponLabel}: hit confirmed.`);
         }
@@ -375,7 +391,13 @@ function performAttack(elapsed) {
       .copy(cameraAimTarget)
       .sub(muzzleOrigin)
       .normalize()
-      .add(new THREE.Vector3((Math.random() - 0.5) * spread, (Math.random() - 0.5) * spread, (Math.random() - 0.5) * spread))
+      .add(
+        new THREE.Vector3(
+          (Math.random() - 0.5) * spread,
+          (Math.random() - 0.5) * spread,
+          (Math.random() - 0.5) * spread
+        )
+      )
       .normalize();
     spawnPlayerProjectile(weapon, muzzleOrigin, tempAimVector);
   }
@@ -452,6 +474,19 @@ function applyUpgrade(slot) {
   setProgression({ level: gameState.level, xp: gameState.xp, points: gameState.points });
 }
 
+function useMedkit() {
+  if (!inventorySystem.consumeConsumable("medkit", 1)) {
+    setStatus("No medkits available.");
+    return;
+  }
+  const healAmount = 28;
+  gameState.health = clamp(gameState.health + healAmount, 0, gameState.maxHealth);
+  setHealth(gameState.health, gameState.maxHealth);
+  updateInventoryUI();
+  setStatus(`Used medkit (+${healAmount} HP).`);
+  playTone(540, 0.12, "triangle", 0.1);
+}
+
 function setPaused(shouldPause) {
   gameState.paused = shouldPause;
   setPauseMenuVisible(shouldPause);
@@ -459,6 +494,11 @@ function setPaused(shouldPause) {
     document.exitPointerLock();
   }
   setStatus(shouldPause ? "Paused." : "Resumed.");
+}
+
+function toggleInventoryPanel() {
+  gameState.inventoryPanelOpen = !gameState.inventoryPanelOpen;
+  setInventoryPanelVisible(gameState.inventoryPanelOpen);
 }
 
 function buildSaveState() {
@@ -475,7 +515,8 @@ function buildSaveState() {
     xp: gameState.xp,
     points: gameState.points,
     upgrades: gameState.upgrades,
-    objective,
+    mission: missionSystem.getSaveState(),
+    inventory: inventorySystem.getSaveState(),
     combat: {
       nextAttackAt: combatState.nextAttackAt,
     },
@@ -490,6 +531,31 @@ function buildSaveState() {
 function performSave() {
   saveGame(buildSaveState());
   setStatus("Game saved.");
+}
+
+function buildMissionStateFromLegacyObjective(legacyObjective) {
+  if (!legacyObjective) return null;
+  const tier = Math.max(1, numberOr(legacyObjective.tier, 1));
+  const target = Math.max(1, numberOr(legacyObjective.target, 3));
+  const timeLimit = Math.max(10, numberOr(legacyObjective.timeLimit, 45));
+  const progress = Math.max(0, numberOr(legacyObjective.collected, 0));
+  const rewardScore = Math.max(1, numberOr(legacyObjective.rewardScore, 10));
+  const rewardXp = Math.max(1, numberOr(legacyObjective.rewardXp, 40));
+
+  return {
+    tier,
+    templateIndex: 0,
+    activeMission: {
+      title: "Crystal Sweep",
+      type: "collect",
+      target,
+      progress,
+      timeLimit,
+      timeLeft: clamp(numberOr(legacyObjective.timeLeft, timeLimit), 0, timeLimit),
+      rewardScore,
+      rewardXp,
+    },
+  };
 }
 
 function performLoad() {
@@ -525,18 +591,8 @@ function performLoad() {
   player.sprintSpeed = 13 + gameState.upgrades.speed * 1.1;
   player.jumpPower = 9 + gameState.upgrades.jump * 0.55;
 
-  const loadedObjective = data.objective;
-  if (loadedObjective) {
-    objective.tier = Math.max(1, numberOr(loadedObjective.tier, 1));
-    objective.target = Math.max(1, numberOr(loadedObjective.target, 3));
-    objective.timeLimit = Math.max(10, numberOr(loadedObjective.timeLimit, 45));
-    objective.timeLeft = clamp(numberOr(loadedObjective.timeLeft, objective.timeLimit), 0, objective.timeLimit);
-    objective.collected = Math.max(0, numberOr(loadedObjective.collected, 0));
-    objective.rewardScore = Math.max(1, numberOr(loadedObjective.rewardScore, 10));
-    objective.rewardXp = Math.max(1, numberOr(loadedObjective.rewardXp, 40));
-  } else {
-    startObjective(1);
-  }
+  inventorySystem.applySaveState(data.inventory || null);
+  missionSystem.applySaveState(data.mission || buildMissionStateFromLegacyObjective(data.objective));
 
   const loadedSettings = data.settings || {};
   gameState.settings = {
@@ -576,7 +632,8 @@ function performLoad() {
   setHealth(gameState.health, gameState.maxHealth);
   setStamina(gameState.stamina, gameState.maxStamina);
   setProgression({ level: gameState.level, xp: gameState.xp, points: gameState.points });
-  refreshObjectiveText();
+  updateInventoryUI();
+  setObjective(missionSystem.getObjectiveText());
   updateWeaponStatus(clock.elapsedTime);
   setStatus("Game loaded.");
 }
@@ -596,6 +653,10 @@ window.addEventListener("keydown", (e) => {
     setStatus("Save reset.");
   } else if (e.code === "KeyQ") {
     cycleWeapon();
+  } else if (e.code === "KeyI") {
+    toggleInventoryPanel();
+  } else if (e.code === "KeyH") {
+    useMedkit();
   } else if (e.code === "Digit1") {
     applyUpgrade(1);
   } else if (e.code === "Digit2") {
@@ -658,6 +719,7 @@ function animate() {
   const dt = Math.min(0.05, clock.getDelta());
   const elapsed = clock.elapsedTime;
 
+  const dayNight = world.getDayNightState(elapsed);
   world.updateDayNight(elapsed, sun, hemi);
 
   if (!gameState.paused) {
@@ -685,7 +747,7 @@ function animate() {
       }
     }
 
-    const enemyResult = enemies.update(dt, elapsed, player.position);
+    const enemyResult = enemies.update(dt, elapsed, player.position, { isNight: dayNight.isNight });
     if (enemyResult.playerDamage > 0) {
       gameState.health = clamp(gameState.health - enemyResult.playerDamage, 0, gameState.maxHealth);
       if (enemyResult.hitByProjectile) {
@@ -694,33 +756,41 @@ function animate() {
       playTone(165, 0.09, "square", 0.07);
     }
 
+    if (enemyResult.nightRushActive && !combatState.nightRushAnnounced) {
+      combatState.nightRushAnnounced = true;
+      setStatus("Night rush! Enemies are swarming your position.");
+      playTone(250, 0.22, "sawtooth", 0.13);
+    } else if (!enemyResult.nightRushActive && combatState.nightRushAnnounced) {
+      combatState.nightRushAnnounced = false;
+      if (dayNight.isNight) {
+        setStatus("Rush wave ended. Stay alert for another attack tonight.");
+      } else {
+        setStatus("Dawn breaks. Enemy rushes have ended.");
+      }
+    }
+
     const rewards = collectibles.update(elapsed, player.position);
     if (rewards.count > 0) {
       gameState.score += rewards.score;
       addXp(rewards.xp);
+
       if (rewards.heal > 0) {
         gameState.health = clamp(gameState.health + rewards.heal, 0, gameState.maxHealth);
       }
-      objective.collected += rewards.count;
+
+      inventorySystem.addResource("scrap", rewards.inventory.scrap);
+      inventorySystem.addResource("crystal", rewards.inventory.crystal);
+      inventorySystem.addConsumable("medkit", rewards.inventory.medkit);
+      missionSystem.onEvent("collectible_collected", { count: rewards.count });
 
       setScore(gameState.score);
+      updateInventoryUI();
       setStatus(`Collected +${rewards.score} score, +${rewards.xp} XP`);
       playTone(rewards.rareCount > 0 ? 820 : 520, 0.15, "triangle", 0.12);
     }
 
-    objective.timeLeft -= dt;
-    if (objective.collected >= objective.target) {
-      gameState.score += objective.rewardScore;
-      addXp(objective.rewardXp);
-      setScore(gameState.score);
-      setStatus(`Objective complete! +${objective.rewardScore} score, +${objective.rewardXp} XP`);
-      playTone(930, 0.2, "triangle", 0.16);
-      startObjective(objective.tier + 1);
-    } else if (objective.timeLeft <= 0) {
-      setStatus("Objective failed. Restarting challenge.");
-      playTone(220, 0.25, "sawtooth", 0.12);
-      startObjective(Math.max(1, objective.tier));
-    }
+    const missionResult = missionSystem.update(dt);
+    applyMissionResult(missionResult);
 
     if (gameState.health <= 0) {
       gameState.health = gameState.maxHealth;
@@ -732,7 +802,6 @@ function animate() {
 
     setHealth(gameState.health, gameState.maxHealth);
     setStamina(gameState.stamina, gameState.maxStamina);
-    refreshObjectiveText();
     updateCombatStatus(elapsed);
     updateWeaponStatus(elapsed);
   }
@@ -741,5 +810,5 @@ function animate() {
   requestAnimationFrame(animate);
 }
 
-setStatus("Explore, survive, fight enemies. LMB attack. 1/2/3 spend upgrade points.");
+setStatus("Explore, survive, fight enemies. LMB attack. I inventory, H medkit.");
 animate();

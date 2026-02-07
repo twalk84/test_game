@@ -9,6 +9,7 @@ function terrainHeight(x, z) {
 }
 
 export function createWorld(scene) {
+  const DAY_NIGHT_FULL_CYCLE_SECONDS = 120;
   const worldSize = 220;
   const segments = 110;
   const cameraCollisionMeshes = [];
@@ -91,12 +92,12 @@ export function createWorld(scene) {
     cameraCollisionMeshes.push(trunk, leafBottom, leafMid, leafTop, leafTip);
   }
 
-  for (let i = 0; i < 210; i++) {
+  for (let i = 0; i < 360; i++) {
     const x = (Math.random() - 0.5) * (worldSize - 20);
     const z = (Math.random() - 0.5) * (worldSize - 20);
     const y = terrainHeight(x, z);
 
-    if (Math.random() < 0.22) {
+    if (Math.random() < 0.12) {
       const rock = new THREE.Mesh(rockGeo, rockMat);
       rock.position.set(x, y + 0.8, z);
       rock.scale.setScalar(0.7 + Math.random() * 1.2);
@@ -184,11 +185,21 @@ export function createWorld(scene) {
     return damage;
   }
 
-  function updateDayNight(elapsedTime, sun, hemi) {
-    const cycle = elapsedTime * 0.08;
+  function getDayNightState(elapsedTime) {
+    const cycle = (elapsedTime / DAY_NIGHT_FULL_CYCLE_SECONDS) * Math.PI * 2;
     const sunHeight = Math.sin(cycle);
-    const moonHeight = -sunHeight;
     const daylight = Math.max(0, (sunHeight + 1) * 0.5);
+    return {
+      cycle,
+      sunHeight,
+      daylight,
+      isNight: sunHeight < 0,
+    };
+  }
+
+  function updateDayNight(elapsedTime, sun, hemi) {
+    const { cycle, sunHeight, daylight } = getDayNightState(elapsedTime);
+    const moonHeight = -sunHeight;
     const nightFactor = 1 - daylight;
     const orbitRadius = worldRadius + 54;
     const orbitYBase = 18;
@@ -233,6 +244,7 @@ export function createWorld(scene) {
     cameraCollisionMeshes,
     getHeightAt: terrainHeight,
     getHazardDamageAt,
+    getDayNightState,
     updateDayNight,
   };
 }

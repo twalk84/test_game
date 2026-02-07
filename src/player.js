@@ -46,7 +46,12 @@ export class PlayerController {
       : [];
     this.cameraRay = new THREE.Raycaster();
 
-    this.avatarRoot = this._createAvatar(options.scene);
+    this.walkCycle = 0;
+    this.moveBlend = 0;
+
+    const avatar = this._createAvatar(options.scene);
+    this.avatarRoot = avatar.root;
+    this.avatarParts = avatar.parts;
     this.avatarRoot.position.copy(this.position);
 
     this._setupInput();
@@ -71,23 +76,106 @@ export class PlayerController {
       metalness: 0,
     });
 
-    const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.34, 0.74, 6, 10), bodyMat);
-    torso.position.set(0, 1.05, 0);
+    const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.32, 0.8, 6, 10), bodyMat);
+    torso.position.set(0, 1.2, 0);
     torso.castShadow = true;
     torso.receiveShadow = true;
 
     const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 14, 14), skinMat);
-    head.position.set(0, 1.78, 0);
+    head.position.set(0, 1.95, 0);
     head.castShadow = true;
 
-    const legs = new THREE.Mesh(new THREE.CapsuleGeometry(0.23, 0.7, 6, 10), accentMat);
-    legs.position.set(0, 0.42, 0);
-    legs.castShadow = true;
-    legs.receiveShadow = true;
+    const shoulderL = new THREE.Group();
+    shoulderL.position.set(-0.34, 1.55, 0);
+    const shoulderR = new THREE.Group();
+    shoulderR.position.set(0.34, 1.55, 0);
 
-    root.add(legs, torso, head);
+    const armUpperGeo = new THREE.CapsuleGeometry(0.08, 0.32, 4, 8);
+    const armLowerGeo = new THREE.CapsuleGeometry(0.07, 0.28, 4, 8);
+
+    const armUpperL = new THREE.Mesh(armUpperGeo, accentMat);
+    armUpperL.position.set(0, -0.2, 0);
+    armUpperL.castShadow = true;
+
+    const armUpperR = new THREE.Mesh(armUpperGeo, accentMat);
+    armUpperR.position.set(0, -0.2, 0);
+    armUpperR.castShadow = true;
+
+    const forearmL = new THREE.Group();
+    forearmL.position.set(0, -0.38, 0);
+    const forearmR = new THREE.Group();
+    forearmR.position.set(0, -0.38, 0);
+
+    const armLowerL = new THREE.Mesh(armLowerGeo, skinMat);
+    armLowerL.position.set(0, -0.16, 0);
+    armLowerL.castShadow = true;
+
+    const armLowerR = new THREE.Mesh(armLowerGeo, skinMat);
+    armLowerR.position.set(0, -0.16, 0);
+    armLowerR.castShadow = true;
+
+    const hipL = new THREE.Group();
+    hipL.position.set(-0.17, 0.78, 0);
+    const hipR = new THREE.Group();
+    hipR.position.set(0.17, 0.78, 0);
+
+    const legUpperGeo = new THREE.CapsuleGeometry(0.1, 0.46, 4, 8);
+    const legLowerGeo = new THREE.CapsuleGeometry(0.09, 0.42, 4, 8);
+
+    const thighL = new THREE.Mesh(legUpperGeo, accentMat);
+    thighL.position.set(0, -0.28, 0);
+    thighL.castShadow = true;
+
+    const thighR = new THREE.Mesh(legUpperGeo, accentMat);
+    thighR.position.set(0, -0.28, 0);
+    thighR.castShadow = true;
+
+    const shinL = new THREE.Group();
+    shinL.position.set(0, -0.56, 0);
+    const shinR = new THREE.Group();
+    shinR.position.set(0, -0.56, 0);
+
+    const calfL = new THREE.Mesh(legLowerGeo, bodyMat);
+    calfL.position.set(0, -0.22, 0.02);
+    calfL.castShadow = true;
+
+    const calfR = new THREE.Mesh(legLowerGeo, bodyMat);
+    calfR.position.set(0, -0.22, 0.02);
+    calfR.castShadow = true;
+
+    shoulderL.add(armUpperL, forearmL);
+    shoulderR.add(armUpperR, forearmR);
+    forearmL.add(armLowerL);
+    forearmR.add(armLowerR);
+
+    hipL.add(thighL, shinL);
+    hipR.add(thighR, shinR);
+    shinL.add(calfL);
+    shinR.add(calfR);
+
+    root.add(torso, head, shoulderL, shoulderR, hipL, hipR);
+
+    root.traverse((obj) => {
+      if (!obj.isMesh) return;
+      obj.castShadow = true;
+      obj.receiveShadow = true;
+    });
+
     if (scene) scene.add(root);
-    return root;
+    return {
+      root,
+      parts: {
+        torso,
+        shoulderL,
+        shoulderR,
+        forearmL,
+        forearmR,
+        hipL,
+        hipR,
+        shinL,
+        shinR,
+      },
+    };
   }
 
   _setupInput() {
@@ -169,6 +257,29 @@ export class PlayerController {
       this.visualYaw += delta * Math.min(1, dt * 14);
     }
     this.avatarRoot.rotation.y = this.visualYaw;
+
+    if (!this.avatarParts) return;
+
+    const horizontalSpeed = Math.hypot(this.velocity.x, this.velocity.z);
+    const moveTarget = hasMoveInput ? 1 : 0;
+    this.moveBlend += (moveTarget - this.moveBlend) * Math.min(1, dt * 10);
+    this.walkCycle += dt * (2.1 + horizontalSpeed * 1.05) * (0.25 + this.moveBlend * 1.2);
+
+    const swing = Math.sin(this.walkCycle) * 0.68 * this.moveBlend;
+    const kneeBendL = Math.max(0, Math.sin(this.walkCycle + Math.PI * 0.5)) * 0.4 * this.moveBlend;
+    const kneeBendR = Math.max(0, Math.sin(this.walkCycle + Math.PI * 1.5)) * 0.4 * this.moveBlend;
+
+    this.avatarParts.shoulderL.rotation.x = swing;
+    this.avatarParts.shoulderR.rotation.x = -swing;
+    this.avatarParts.forearmL.rotation.x = -Math.max(0, swing) * 0.45;
+    this.avatarParts.forearmR.rotation.x = Math.max(0, swing) * 0.45;
+
+    this.avatarParts.hipL.rotation.x = -swing;
+    this.avatarParts.hipR.rotation.x = swing;
+    this.avatarParts.shinL.rotation.x = kneeBendL;
+    this.avatarParts.shinR.rotation.x = kneeBendR;
+
+    this.avatarParts.torso.position.y = 1.2 + Math.sin(this.walkCycle * 2) * 0.03 * this.moveBlend;
   }
 
   _updateCamera(dt) {

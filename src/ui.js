@@ -38,6 +38,17 @@ export function setObjective(text) {
   if (objectiveEl) objectiveEl.textContent = text;
 }
 
+export function setInventorySummary(text) {
+  const inventoryEl = document.getElementById("inventorySummary");
+  if (inventoryEl) inventoryEl.textContent = text;
+}
+
+export function setInventoryPanelVisible(visible) {
+  const panel = document.getElementById("inventoryPanel");
+  if (!panel) return;
+  panel.classList.toggle("hidden", !visible);
+}
+
 export function setCombatStatus(text) {
   const combatEl = document.getElementById("combatStatus");
   if (combatEl) combatEl.textContent = text;

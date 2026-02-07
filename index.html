@@ -16,6 +16,7 @@
     <div class="bar"><div id="staminaBar"></div></div>
     <div class="row">Level: <span id="level">1</span> | XP: <span id="xp">0</span> | Points: <span id="points">0</span></div>
     <div class="row">Objective: <span id="objective">Collect 3 crystals in 45s</span></div>
+    <div class="row">Inventory: <span id="inventorySummary">Scrap 0 • Crystal 0 • Medkit 0</span></div>
     <div class="row">Weapon: <span id="weaponStatus">Rifle • Ready</span></div>
     <div class="row">Combat: <span id="combatStatus">Ready</span></div>
     <div class="row hint">Click game to lock mouse</div>
@@ -23,8 +24,19 @@
     <div class="row hint">Hold RMB to aim camera, V to swap shoulder</div>
     <div class="row hint">LMB attack, Q cycle weapon (Rifle / Shotgun / Pulse)</div>
     <div class="row hint">K save, L load, R reset save, P pause</div>
+    <div class="row hint">I inventory, H use medkit</div>
     <div class="row hint">1/2/3 spend upgrade points</div>
     <div class="row status" id="status">Ready.</div>
+  </div>
+
+  <div id="inventoryPanel" class="panel hidden">
+    <h3>Inventory</h3>
+    <div class="row"><strong>Resources</strong></div>
+    <div class="row">Scrap: <span id="invScrap">0</span></div>
+    <div class="row">Crystal: <span id="invCrystal">0</span></div>
+    <div class="row"><strong>Consumables</strong></div>
+    <div class="row">Medkit: <span id="invMedkit">0</span></div>
+    <div class="hint">Press I to close • Press H to use medkit</div>
   </div>
 
   <div id="pauseMenu" class="panel hidden">

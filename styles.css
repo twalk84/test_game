@@ -111,6 +111,10 @@ html, body {
   backdrop-filter: blur(4px);
 }
 
+#inventoryPanel {
+  top: 260px;
+}
+
 .panel h3 {
   margin: 0 0 10px;
 }
