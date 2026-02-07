@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Open World MVP - Three.js</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="hud">
+    <div class="row"><strong>Open World MVP</strong></div>
+    <div class="row">Score: <span id="score">0</span></div>
+    <div class="row">HP: <span id="healthText">100 / 100</span></div>
+    <div class="bar"><div id="healthBar"></div></div>
+    <div class="row">Stamina: <span id="staminaText">100 / 100</span></div>
+    <div class="bar"><div id="staminaBar"></div></div>
+    <div class="row">Level: <span id="level">1</span> | XP: <span id="xp">0</span> | Points: <span id="points">0</span></div>
+    <div class="row">Objective: <span id="objective">Collect 3 crystals in 45s</span></div>
+    <div class="row">Weapon: <span id="weaponStatus">Rifle • Ready</span></div>
+    <div class="row">Combat: <span id="combatStatus">Ready</span></div>
+    <div class="row hint">Click game to lock mouse</div>
+    <div class="row hint">WASD move, Space jump, Shift sprint</div>
+    <div class="row hint">Hold RMB to aim camera, V to swap shoulder</div>
+    <div class="row hint">LMB attack, Q cycle weapon (Rifle / Shotgun / Pulse)</div>
+    <div class="row hint">K save, L load, R reset save, P pause</div>
+    <div class="row hint">1/2/3 spend upgrade points</div>
+    <div class="row status" id="status">Ready.</div>
+  </div>
+
+  <div id="pauseMenu" class="panel hidden">
+    <h3>Paused</h3>
+    <label class="setting">Look Sensitivity
+      <input id="sensitivity" type="range" min="0.4" max="2.2" step="0.1" value="1" />
+    </label>
+    <label class="setting">Master Volume
+      <input id="volume" type="range" min="0" max="1" step="0.05" value="0.4" />
+    </label>
+    <label class="setting checkbox">
+      <input id="mute" type="checkbox" /> Mute Audio
+    </label>
+    <div class="hint">Press P to resume</div>
+  </div>
+
+  <canvas id="game"></canvas>
+  <div id="crosshair" aria-hidden="true">
+    <span class="crosshair-line horizontal"></span>
+    <span class="crosshair-line vertical"></span>
+  </div>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

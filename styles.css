@@ -1,0 +1,133 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0b1220;
+  color: #f1f5f9;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+#game {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+}
+
+#crosshair {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: 22px;
+  height: 22px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 9;
+}
+
+.crosshair-line {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.85);
+}
+
+.crosshair-line.horizontal {
+  width: 14px;
+  height: 2px;
+  transform: translate(-50%, -50%);
+}
+
+.crosshair-line.vertical {
+  width: 2px;
+  height: 14px;
+  transform: translate(-50%, -50%);
+}
+
+#hud {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 10;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 10px;
+  padding: 10px 12px;
+  min-width: 280px;
+  backdrop-filter: blur(3px);
+}
+
+.row {
+  margin: 4px 0;
+}
+
+.bar {
+  width: 220px;
+  height: 10px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+
+#healthBar,
+#staminaBar {
+  height: 100%;
+  width: 100%;
+  transition: width 120ms linear;
+}
+
+#healthBar {
+  background: linear-gradient(90deg, #ef4444, #f97316);
+}
+
+#staminaBar {
+  background: linear-gradient(90deg, #22c55e, #84cc16);
+}
+
+.hint {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.status {
+  margin-top: 8px;
+  color: #93c5fd;
+  min-height: 1em;
+}
+
+.panel {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 11;
+  width: 300px;
+  padding: 14px;
+  background: rgba(0, 0, 0, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 12px;
+  backdrop-filter: blur(4px);
+}
+
+.panel h3 {
+  margin: 0 0 10px;
+}
+
+.setting {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+
+.setting.checkbox {
+  flex-direction: row;
+  align-items: center;
+}
+
+.hidden {
+  display: none;
+}
