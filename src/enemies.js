@@ -359,6 +359,7 @@ export class EnemySystem {
         punchHitDone: false,
         punchHitAt: 0,
         punchEndAt: 0,
+        lastVehicleHitAt: -999,
       };
 
       this.enemies.push(enemy);
@@ -494,6 +495,56 @@ export class EnemySystem {
       hitCount,
       kills,
     };
+  }
+
+  applyVehicleImpact(vehicle, time, options = {}) {
+    if (!vehicle || !vehicle.mesh) {
+      return { hitCount: 0, kills: [], nonLethalHits: 0, impactStrength: 0 };
+    }
+
+    const minSpeed = Math.max(0, numberOr(options.minSpeed, 4.5));
+    const runOverSpeed = Math.max(minSpeed, numberOr(options.runOverSpeed, 11));
+    const cooldown = Math.max(0.08, numberOr(options.hitCooldown, 0.45));
+    const speed = Math.abs(numberOr(vehicle.speed, 0));
+    if (speed < minSpeed) {
+      return { hitCount: 0, kills: [], nonLethalHits: 0, impactStrength: 0 };
+    }
+
+    const baseRadius = numberOr(options.radius, 1.35);
+    const radius = baseRadius + clamp(speed / 28, 0, 0.7);
+    const vehiclePos = vehicle.mesh.position;
+    const forward = new THREE.Vector3(Math.sin(vehicle.yaw || 0), 0, Math.cos(vehicle.yaw || 0)).normalize();
+
+    const kills = [];
+    let hitCount = 0;
+    let nonLethalHits = 0;
+
+    for (const enemy of this.enemies) {
+      if (!enemy.alive) continue;
+      if (time - (enemy.lastVehicleHitAt || -999) < cooldown) continue;
+
+      const toEnemy = enemy.mesh.position.clone().sub(vehiclePos);
+      toEnemy.y = 0;
+      const dist = toEnemy.length();
+      if (dist > radius || dist < 0.0001) continue;
+
+      const frontDot = toEnemy.clone().normalize().dot(forward);
+      if (frontDot < -0.25) continue;
+
+      const damage = speed >= runOverSpeed ? 9999 : 10 + speed * 2.2;
+      const hit = this._applyDamage(enemy, damage, time);
+      enemy.lastVehicleHitAt = time;
+      if (!hit.hit) continue;
+
+      hitCount += 1;
+      if (hit.killed) kills.push(hit);
+      else nonLethalHits += 1;
+
+      if (hitCount >= 2) break;
+    }
+
+    const impactStrength = hitCount > 0 ? clamp(0.08 + speed / 55, 0.08, 0.36) : 0;
+    return { hitCount, kills, nonLethalHits, impactStrength };
   }
 
   _updateEnemyVisual(enemy, time) {
@@ -731,6 +782,9 @@ export class EnemySystem {
   update(dt, elapsed, playerPos, context = {}) {
     this._playerPosRef = playerPos;
     const isNight = Boolean(context.isNight);
+    const targetVehicle = context.vehicle || null;
+    const vehicleHitRadius = Math.max(0.8, numberOr(context.vehicleHitRadius, 1.4));
+    const vehicleActive = Boolean(context.inVehicle && targetVehicle && targetVehicle.mesh && targetVehicle.health > 0);
     const nightRushActive = this._updateNightRushState(elapsed, isNight);
 
     if (this.nightRush.dawnResetPending) {
@@ -745,10 +799,12 @@ export class EnemySystem {
 
     const result = {
       playerDamage: 0,
+      vehicleDamage: 0,
       kills: 0,
       score: 0,
       xp: 0,
       hitByProjectile: false,
+      hitVehicleByProjectile: false,
       nightRushActive,
     };
 
@@ -778,7 +834,12 @@ export class EnemySystem {
 
       if (enemy.punchActive) {
         if (!enemy.punchHitDone && elapsed >= enemy.punchHitAt && dist <= cfg.attackRange + 0.45) {
-          result.playerDamage += cfg.attackDamage;
+          if (vehicleActive) {
+            const antiVehicleMultiplier = enemy.type === "charger" ? 1.35 : enemy.type === "bruiser" ? 1.2 : 1;
+            result.vehicleDamage += cfg.attackDamage * antiVehicleMultiplier;
+          } else {
+            result.playerDamage += cfg.attackDamage;
+          }
           enemy.punchHitDone = true;
         }
         if (elapsed >= enemy.punchEndAt) {
@@ -831,13 +892,20 @@ export class EnemySystem {
       const yGround = this.getHeightAt(p.mesh.position.x, p.mesh.position.z);
       const hitGround = p.mesh.position.y <= yGround + 0.2;
       const hitPlayer = p.mesh.position.distanceTo(playerPos) < 1.2;
+      const hitVehicle =
+        vehicleActive && targetVehicle && p.mesh.position.distanceTo(targetVehicle.mesh.position) < vehicleHitRadius;
 
       if (hitPlayer) {
         result.playerDamage += p.damage;
         result.hitByProjectile = true;
       }
 
-      if (p.life <= 0 || hitGround || hitPlayer) {
+      if (hitVehicle) {
+        result.vehicleDamage += p.damage * 0.9;
+        result.hitVehicleByProjectile = true;
+      }
+
+      if (p.life <= 0 || hitGround || hitPlayer || hitVehicle) {
         this.scene.remove(p.mesh);
         this.projectiles.splice(i, 1);
       }

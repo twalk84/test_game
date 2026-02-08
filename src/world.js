@@ -1,4 +1,5 @@
 import * as THREE from "https://unpkg.com/three@0.161.0/build/three.module.js";
+import { GAME_CONFIG } from "./config.js";
 
 function terrainHeight(x, z) {
   return (
@@ -44,7 +45,7 @@ function horizontalPushFromAabb(x, z, radius, box) {
 
 export function createWorld(scene) {
   const DAY_NIGHT_FULL_CYCLE_SECONDS = 120;
-  const worldSize = 220;
+  const worldSize = Math.max(220, Number(GAME_CONFIG.world?.size) || 220);
   const segments = 110;
   const worldRadius = worldSize * 0.5;
 
@@ -60,7 +61,26 @@ export function createWorld(scene) {
     centerX: 0,
     centerZ: 10,
     width: 12,
-    length: 90,
+    length: Math.max(90, Math.round(worldSize * 0.6)),
+  };
+
+  const freeway = {
+    enabled: GAME_CONFIG.world?.freeway?.enabled !== false,
+    deckHeight: Number(GAME_CONFIG.world?.freeway?.deckHeight) || 16,
+    deckWidth: Number(GAME_CONFIG.world?.freeway?.deckWidth) || 26,
+    edgePadding: Number(GAME_CONFIG.world?.freeway?.edgePadding) || 24,
+    deckThickness: Number(GAME_CONFIG.world?.freeway?.deckThickness) || 1.15,
+    pillarSpacing: Number(GAME_CONFIG.world?.freeway?.pillarSpacing) || 18,
+    rampHalfWidth: Number(GAME_CONFIG.world?.freeway?.rampHalfWidth) || 5,
+    rampRun: Number(GAME_CONFIG.world?.freeway?.rampRun) || 42,
+    curveRadius: Number(GAME_CONFIG.world?.freeway?.curveRadius) || Math.max(42, worldRadius - 46),
+    curveSegments: Number(GAME_CONFIG.world?.freeway?.curveSegments) || 56,
+    laneWidth: Number(GAME_CONFIG.world?.freeway?.laneWidth) || 3.4,
+    shoulderWidth: Number(GAME_CONFIG.world?.freeway?.shoulderWidth) || 2.6,
+    ringDecks: [],
+    ringCenterPath: [],
+    lanes: [],
+    ramps: [],
   };
 
   const enemyPen = {
@@ -109,10 +129,23 @@ export function createWorld(scene) {
   }
 
   function isNearRoad(x, z, padding = 0) {
-    return (
+    const onMainRoad = (
       Math.abs(x - road.centerX) < road.width * 0.5 + padding &&
       Math.abs(z - road.centerZ) < road.length * 0.5 + padding
     );
+    if (onMainRoad) return true;
+
+    for (const lane of freeway.lanes) {
+      if (x >= lane.minX - padding && x <= lane.maxX + padding && z >= lane.minZ - padding && z <= lane.maxZ + padding) {
+        return true;
+      }
+    }
+    for (const ramp of freeway.ramps) {
+      if (x >= ramp.minX - padding && x <= ramp.maxX + padding && z >= ramp.minZ - padding && z <= ramp.maxZ + padding) {
+        return true;
+      }
+    }
+    return false;
   }
 
   function isNearEnemyPen(x, z, padding = 0) {
@@ -209,6 +242,155 @@ export function createWorld(scene) {
   roadOverlay.receiveShadow = true;
   roadOverlay.castShadow = false;
   scene.add(roadOverlay);
+
+  if (freeway.enabled) {
+    const freewayMat = new THREE.MeshStandardMaterial({ color: 0x363b42, roughness: 0.88, metalness: 0.06 });
+    const pillarMat = new THREE.MeshStandardMaterial({ color: 0x7c838d, roughness: 0.9, metalness: 0.12 });
+    const lineYellowMat = new THREE.MeshStandardMaterial({ color: 0xe7c84e, roughness: 0.75, metalness: 0.04 });
+    const lineWhiteMat = new THREE.MeshStandardMaterial({ color: 0xe4ebf2, roughness: 0.78, metalness: 0.03 });
+    const deckY = freeway.deckHeight;
+    const deckTopY = deckY + freeway.deckThickness * 0.5;
+    const ringRadius = clamp(freeway.curveRadius, 32, worldRadius - 18);
+    const laneWidth = freeway.laneWidth;
+    const shoulderWidth = freeway.shoulderWidth;
+    const fullWidth = laneWidth * 4 + shoulderWidth * 2;
+    freeway.deckWidth = fullWidth;
+
+    const ringShape = new THREE.Shape();
+    ringShape.absarc(0, 0, ringRadius + fullWidth * 0.5, 0, Math.PI * 2, false);
+    const hole = new THREE.Path();
+    hole.absarc(0, 0, Math.max(6, ringRadius - fullWidth * 0.5), 0, Math.PI * 2, true);
+    ringShape.holes.push(hole);
+    const ringGeo = new THREE.ExtrudeGeometry(ringShape, { depth: freeway.deckThickness, bevelEnabled: false, curveSegments: freeway.curveSegments });
+    ringGeo.rotateX(-Math.PI * 0.5);
+    const ringMesh = new THREE.Mesh(ringGeo, freewayMat);
+    ringMesh.position.set(0, deckY - freeway.deckThickness * 0.5, 0);
+    ringMesh.castShadow = true;
+    ringMesh.receiveShadow = true;
+    scene.add(ringMesh);
+    cameraCollisionMeshes.push(ringMesh);
+    addBlockingMesh(ringMesh, { x: (ringRadius + fullWidth) * 2, y: freeway.deckThickness, z: (ringRadius + fullWidth) * 2 });
+
+    const pathSteps = Math.max(72, freeway.curveSegments * 2);
+    for (let i = 0; i < pathSteps; i++) {
+      const a0 = (i / pathSteps) * Math.PI * 2;
+      const a1 = ((i + 1) / pathSteps) * Math.PI * 2;
+      const mid = (a0 + a1) * 0.5;
+      const cX = Math.cos(mid) * ringRadius;
+      const cZ = Math.sin(mid) * ringRadius;
+      const segLen = ringRadius * (a1 - a0);
+      const segW = fullWidth;
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(segLen + 0.2, freeway.deckThickness, segW), freewayMat);
+      mesh.position.set(cX, deckY, cZ);
+      mesh.rotation.y = -mid;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      scene.add(mesh);
+      cameraCollisionMeshes.push(mesh);
+      freeway.ringDecks.push(mesh);
+      freeway.ringCenterPath.push({ x: cX, z: cZ, y: deckTopY });
+      freeway.lanes.push({
+        minX: cX - segLen * 0.55,
+        maxX: cX + segLen * 0.55,
+        minZ: cZ - segW * 0.52,
+        maxZ: cZ + segW * 0.52,
+      });
+      addFlatWalkable(cX - segLen * 0.55, cX + segLen * 0.55, cZ - segW * 0.52, cZ + segW * 0.52, deckTopY);
+    }
+
+    const lineSpec = [
+      { offset: 0, width: 0.2, mat: lineYellowMat },
+      { offset: 0.32, width: 0.16, mat: lineYellowMat },
+      { offset: -0.32, width: 0.16, mat: lineYellowMat },
+      { offset: laneWidth, width: 0.14, mat: lineWhiteMat },
+      { offset: -laneWidth, width: 0.14, mat: lineWhiteMat },
+      { offset: laneWidth * 2, width: 0.12, mat: lineWhiteMat },
+      { offset: -laneWidth * 2, width: 0.12, mat: lineWhiteMat },
+    ];
+
+    for (const spec of lineSpec) {
+      const r = ringRadius + spec.offset;
+      const tg = new THREE.TorusGeometry(Math.max(4, r), spec.width, 6, Math.max(120, freeway.curveSegments * 3));
+      const tm = new THREE.Mesh(tg, spec.mat);
+      tm.rotation.x = Math.PI * 0.5;
+      tm.position.y = deckTopY + 0.03;
+      tm.receiveShadow = true;
+      scene.add(tm);
+    }
+
+    const rampAnchors = [
+      { angle: -Math.PI * 0.5 },
+      { angle: Math.PI * 0.5 },
+      { angle: Math.PI },
+      { angle: 0 },
+    ];
+
+    for (const anchor of rampAnchors) {
+      const ax = Math.cos(anchor.angle) * ringRadius;
+      const az = Math.sin(anchor.angle) * ringRadius;
+      const outward = new THREE.Vector3(Math.cos(anchor.angle), 0, Math.sin(anchor.angle)).normalize();
+      const rampLen = freeway.rampRun;
+      const deckPoint = new THREE.Vector3(ax, 0, az);
+      const groundPoint = deckPoint.clone().add(outward.clone().multiplyScalar(rampLen));
+      const yGround = terrainHeight(groundPoint.x, groundPoint.z) + 0.04;
+      const yDeck = deckTopY;
+      const center = new THREE.Vector3(
+        (deckPoint.x + groundPoint.x) * 0.5,
+        (yDeck + yGround) * 0.5 - 0.45,
+        (deckPoint.z + groundPoint.z) * 0.5
+      );
+
+      const rampDir = new THREE.Vector3(
+        deckPoint.x - groundPoint.x,
+        yDeck - yGround,
+        deckPoint.z - groundPoint.z
+      ).normalize();
+
+      const rampGeo = new THREE.BoxGeometry(freeway.rampHalfWidth * 2, 0.9, rampLen);
+      const rampMesh = new THREE.Mesh(rampGeo, freewayMat);
+      rampMesh.position.copy(center);
+      rampMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), rampDir);
+      rampMesh.castShadow = true;
+      rampMesh.receiveShadow = true;
+      scene.add(rampMesh);
+      cameraCollisionMeshes.push(rampMesh);
+
+      const axis = Math.abs(outward.x) >= Math.abs(outward.z) ? "x" : "z";
+      addRampWalkable(
+        Math.min(deckPoint.x, groundPoint.x) - freeway.rampHalfWidth,
+        Math.max(deckPoint.x, groundPoint.x) + freeway.rampHalfWidth,
+        Math.min(deckPoint.z, groundPoint.z) - freeway.rampHalfWidth,
+        Math.max(deckPoint.z, groundPoint.z) + freeway.rampHalfWidth,
+        axis,
+        axis === "x" ? groundPoint.x : groundPoint.z,
+        axis === "x" ? deckPoint.x : deckPoint.z,
+        yGround,
+        yDeck
+      );
+      freeway.ramps.push({
+        minX: Math.min(deckPoint.x, groundPoint.x) - freeway.rampHalfWidth,
+        maxX: Math.max(deckPoint.x, groundPoint.x) + freeway.rampHalfWidth,
+        minZ: Math.min(deckPoint.z, groundPoint.z) - freeway.rampHalfWidth,
+        maxZ: Math.max(deckPoint.z, groundPoint.z) + freeway.rampHalfWidth,
+      });
+    }
+
+    const pillarStep = Math.max(8, freeway.pillarSpacing);
+    const pillarCount = Math.max(20, Math.floor((Math.PI * 2 * ringRadius) / pillarStep));
+    for (let i = 0; i < pillarCount; i++) {
+      const a = (i / pillarCount) * Math.PI * 2;
+      const px = Math.cos(a) * ringRadius;
+      const pz = Math.sin(a) * ringRadius;
+      const baseY = terrainHeight(px, pz);
+      const h = Math.max(2, deckY - baseY - 0.3);
+      const pillar = new THREE.Mesh(new THREE.CylinderGeometry(0.75, 0.95, h, 12), pillarMat);
+      pillar.position.set(px, baseY + h * 0.5, pz);
+      pillar.castShadow = true;
+      pillar.receiveShadow = true;
+      scene.add(pillar);
+      addBlockingMesh(pillar, { x: 2.1, y: h, z: 2.1 });
+    }
+  }
 
   function buildEnemyPen() {
     const fenceMat = new THREE.MeshStandardMaterial({ color: 0x8e949b, roughness: 0.86, metalness: 0.22 });
@@ -901,7 +1083,7 @@ export function createWorld(scene) {
       });
     }
   }
-  spawnCivilians(8);
+  spawnCivilians(65);
 
   function updateCivilians(dt) {
     for (const c of civilians) {
@@ -1145,8 +1327,12 @@ export function createWorld(scene) {
   }
 
   function getHeightAtDetailed(x, z, currentY = terrainHeight(x, z)) {
-    let best = terrainHeight(x, z);
+    const ground = terrainHeight(x, z);
+    let best = ground;
     let bestDelta = Math.abs(best - currentY);
+    const maxStepUp = 3.8;
+    const maxStepDown = 4.5;
+    let rampBest = null;
 
     for (const s of walkableSurfaces) {
       if (x < s.minX || x > s.maxX || z < s.minZ || z > s.maxZ) continue;
@@ -1158,11 +1344,27 @@ export function createWorld(scene) {
         y = s.yStart + (s.yEnd - s.yStart) * t;
       }
 
+      const stepFromCurrent = y - currentY;
+      if (stepFromCurrent > maxStepUp || stepFromCurrent < -maxStepDown) {
+        continue;
+      }
+
+      if (s.type === "ramp") {
+        if (rampBest === null || y > rampBest) {
+          rampBest = y;
+        }
+        continue;
+      }
+
       const delta = Math.abs(y - currentY);
-      if (delta < bestDelta + 0.001 || y > best) {
+      if (delta < bestDelta + 0.001) {
         best = y;
         bestDelta = delta;
       }
+    }
+
+    if (rampBest !== null) {
+      return rampBest;
     }
 
     return best;
@@ -1170,6 +1372,7 @@ export function createWorld(scene) {
 
   function resolveHorizontalCollision(position, radius = 0.45, bottomY = -Infinity, topY = Infinity) {
     const volumes = [...blockingVolumes];
+    let totalPush = 0;
     for (const dynamicVolume of dynamicBlockingVolumes) {
       if (dynamicVolume.isEnabled && !dynamicVolume.isEnabled()) continue;
       const box = dynamicVolume.getBox ? dynamicVolume.getBox() : null;
@@ -1184,13 +1387,12 @@ export function createWorld(scene) {
         if (!push) continue;
         position.x += push.x;
         position.z += push.z;
+        totalPush += Math.hypot(push.x, push.z);
         adjusted = true;
       }
       if (!adjusted) break;
     }
-
-    position.x = clamp(position.x, -worldRadius + radius + 1, worldRadius - radius - 1);
-    position.z = clamp(position.z, -worldRadius + radius + 1, worldRadius - radius - 1);
+    return totalPush;
   }
 
   function getCameraTuningForPosition(playerPos) {
@@ -1342,5 +1544,14 @@ export function createWorld(scene) {
     getDynamicState,
     applyDynamicState,
     getEnemyContainmentState,
+    getFreewayTrafficPath: () => ({
+      points: freeway.ringCenterPath,
+      laneOffsets: [
+        -freeway.laneWidth * 1.5,
+        -freeway.laneWidth * 0.5,
+        freeway.laneWidth * 0.5,
+        freeway.laneWidth * 1.5,
+      ],
+    }),
   };
 }

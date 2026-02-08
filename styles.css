@@ -37,6 +37,16 @@ html, body {
   transition: opacity 120ms linear;
 }
 
+#blackoutOverlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 20;
+  opacity: 0;
+  background: #000;
+  transition: opacity 140ms linear;
+}
+
 .crosshair-line {
   position: absolute;
   left: 50%;
@@ -114,7 +124,8 @@ html, body {
 
 #healthBar,
 #staminaBar,
-#weaponHeatBar {
+#weaponHeatBar,
+#vehicleHealthBar {
   height: 100%;
   width: 100%;
   transition: width 120ms linear;
@@ -130,6 +141,10 @@ html, body {
 
 #weaponHeatBar {
   background: linear-gradient(90deg, #f59e0b, #ef4444);
+}
+
+#vehicleHealthBar {
+  background: linear-gradient(90deg, #22c55e, #f59e0b, #ef4444);
 }
 
 .hint {
@@ -211,6 +226,13 @@ body.sniper-scope .crosshair-dot {
 
 #inventoryPanel {
   top: 260px;
+}
+
+#controlsPanel {
+  top: 20px;
+  right: 340px;
+  width: 320px;
+  max-width: 36vw;
 }
 
 .panel h3 {

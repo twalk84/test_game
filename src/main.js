@@ -13,6 +13,7 @@ import {
   setCombatStatus,
   setCrosshairSpread,
   setDamageOverlay,
+  setBlackoutOverlay,
   setEffectsStatus,
   setHealth,
   setInventoryPanelVisible,
@@ -22,8 +23,10 @@ import {
   setProgression,
   setScore,
   setVehicleStatus,
+  setVehicleHealth,
   setDebugOverlayVisible,
   setDebugText,
+  setControlsPanelVisible,
   setSniperScopeActive,
   setStamina,
   setStatus,
@@ -111,6 +114,7 @@ const gameState = {
   inVehicle: false,
   activeVehicleId: null,
   inventoryPanelOpen: false,
+  controlsPanelOpen: false,
   settings: {
     sensitivity: 1,
     volume: 0.4,
@@ -129,6 +133,9 @@ const player = new PlayerController(camera, world.getHeightAt, {
   cameraCollisionMeshes: world.cameraCollisionMeshes,
   getHeightAtDetailed: world.getHeightAtDetailed,
   resolveHorizontalCollision: world.resolveHorizontalCollision,
+  resolveExternalCollision: (position, radius) => {
+    vehicles.resolvePointCollision?.(position, radius, gameState.activeVehicleId);
+  },
   getCameraTuningForPosition: world.getCameraTuningForPosition,
   constrainCameraPosition: world.constrainCameraPosition,
   canSprint: (dt, wantsSprintMove) => {
@@ -293,6 +300,9 @@ const playerProjectiles = [];
 const muzzleFlashes = [];
 const flameBursts = [];
 const driftPuffs = [];
+const vehicleSmokePlumes = [];
+const explosionDebris = [];
+const ambientTrafficVehicles = [];
 const inputState = {
   primaryDown: false,
 };
@@ -307,6 +317,60 @@ const supplyCache = {
   cooldownUntil: 0,
 };
 
+const vehicleCombatConfig = {
+  repairAmount: GAME_CONFIG.vehicles?.combat?.repairAmount ?? 48,
+  repairRange: GAME_CONFIG.vehicles?.combat?.repairRange ?? 4.2,
+  destroyRecoverySeconds: GAME_CONFIG.vehicles?.combat?.destroyRecoverySeconds ?? 8,
+  projectileHitRadius: GAME_CONFIG.vehicles?.combat?.projectileHitRadius ?? 1.4,
+};
+
+const mountedWeaponConfig = {
+  damage: GAME_CONFIG.vehicles?.mountedWeapon?.damage ?? 16,
+  range: GAME_CONFIG.vehicles?.mountedWeapon?.range ?? 72,
+  fireRate: GAME_CONFIG.vehicles?.mountedWeapon?.fireRate ?? 8,
+  spread: GAME_CONFIG.vehicles?.mountedWeapon?.spread ?? 0.03,
+  hitRadius: GAME_CONFIG.vehicles?.mountedWeapon?.hitRadius ?? 0.22,
+  heatPerShot: GAME_CONFIG.vehicles?.mountedWeapon?.heatPerShot ?? 0.1,
+  coolPerSecond: GAME_CONFIG.vehicles?.mountedWeapon?.coolPerSecond ?? 0.24,
+  maxHeat: GAME_CONFIG.vehicles?.mountedWeapon?.maxHeat ?? 1,
+  overheatDuration: GAME_CONFIG.vehicles?.mountedWeapon?.overheatDuration ?? 1.35,
+  resumeHeatThreshold: GAME_CONFIG.vehicles?.mountedWeapon?.resumeHeatThreshold ?? 0.34,
+};
+
+const mountedWeaponState = {
+  nextFireAt: 0,
+  heat: 0,
+  overheatUntil: 0,
+};
+
+const voidRespawnState = {
+  active: false,
+  until: 0,
+};
+
+function startVoidRespawn(elapsed, message = "Out of bounds") {
+  if (voidRespawnState.active) return;
+  voidRespawnState.active = true;
+  voidRespawnState.until = elapsed + 2;
+  inputState.primaryDown = false;
+  announce(`${message}. Respawning...`, { tone: "danger", priority: 3, hold: 1.6 });
+  setBlackoutOverlay(1);
+}
+
+function completeVoidRespawn() {
+  if (gameState.inVehicle) {
+    gameState.inVehicle = false;
+    gameState.activeVehicleId = null;
+  }
+  vehicleCameraState.initialized = false;
+  player.avatarRoot.visible = true;
+  player.setPosition(0, world.getHeightAtDetailed(0, 0, world.getHeightAt(0, 0)) + 1.6, 0);
+  setVehicleHealth(0, 0, false);
+  setVehicleStatus("On foot");
+  setBlackoutOverlay(0);
+  voidRespawnState.active = false;
+}
+
 function getActiveVehicle() {
   if (!gameState.activeVehicleId) return null;
   return vehicles.getById(gameState.activeVehicleId);
@@ -318,8 +382,10 @@ function getVehicleControlsFromPlayerKeys() {
   if (player.keys.has("KeyS") || player.keys.has("ArrowDown")) throttle -= 1;
 
   let steer = 0;
-  if (player.keys.has("KeyA") || player.keys.has("ArrowLeft")) steer -= 1;
-  if (player.keys.has("KeyD") || player.keys.has("ArrowRight")) steer += 1;
+  if (player.keys.has("KeyA")) steer += 1;
+  if (player.keys.has("KeyD")) steer -= 1;
+  if (player.keys.has("ArrowLeft")) steer -= 1;
+  if (player.keys.has("ArrowRight")) steer += 1;
 
   const brake = player.keys.has("Space");
   const boost = player.keys.has("KeyN");
@@ -348,10 +414,36 @@ function exitVehicle() {
   if (!vehicle) return;
 
   const right = new THREE.Vector3(Math.cos(vehicle.yaw), 0, -Math.sin(vehicle.yaw));
-  const exitPos = vehicle.mesh.position.clone().add(right.multiplyScalar(1.9));
-  const y = world.getHeightAtDetailed(exitPos.x, exitPos.z, world.getHeightAt(exitPos.x, exitPos.z)) + 1.6;
+  const forward = vehicles.getForwardVector(vehicle);
+  const offsets = [
+    right.clone().multiplyScalar(1.9),
+    right.clone().multiplyScalar(-1.9),
+    forward.clone().multiplyScalar(-2.1),
+    forward.clone().multiplyScalar(2.0),
+    right.clone().multiplyScalar(1.35).add(forward.clone().multiplyScalar(-1.2)),
+    right.clone().multiplyScalar(-1.35).add(forward.clone().multiplyScalar(-1.2)),
+  ];
 
-  player.setPosition(exitPos.x, y, exitPos.z);
+  let selected = null;
+  for (const offset of offsets) {
+    const candidate = vehicle.mesh.position.clone().add(offset);
+    candidate.y = world.getHeightAtDetailed(candidate.x, candidate.z, vehicle.mesh.position.y - 0.06) + 1.6;
+    if (world.resolveHorizontalCollision) {
+      world.resolveHorizontalCollision(candidate, 0.45, candidate.y - 1.6, candidate.y + 0.2);
+    }
+    vehicles.resolvePointCollision?.(candidate, 0.45, vehicle.id);
+    if (candidate.distanceTo(vehicle.mesh.position) <= 3.2) {
+      selected = candidate;
+      break;
+    }
+  }
+
+  if (!selected) {
+    selected = vehicle.mesh.position.clone().add(right.multiplyScalar(1.6));
+    selected.y = world.getHeightAtDetailed(selected.x, selected.z, vehicle.mesh.position.y - 0.06) + 1.6;
+  }
+
+  player.setPosition(selected.x, selected.y, selected.z);
   player.avatarRoot.visible = true;
   gameState.inVehicle = false;
   gameState.activeVehicleId = null;
@@ -372,6 +464,12 @@ function enterNearestVehicle() {
     return;
   }
 
+  const stage = vehicles.getExplosionStage ? vehicles.getExplosionStage(nearest) : "intact";
+  if (stage === "burning" || stage === "exploded" || stage === "wreck") {
+    announce("That vehicle is wrecked and cannot be driven.", { tone: "warn", priority: 2, hold: 1.2 });
+    return;
+  }
+
   gameState.inVehicle = true;
   gameState.activeVehicleId = nearest.id;
   player.avatarRoot.visible = false;
@@ -382,6 +480,7 @@ function enterNearestVehicle() {
     priority: 2,
     hold: 1.6,
   });
+  announce("Mounted cannon online: hold LMB to fire.", { tone: "info", priority: 1, hold: 1.2 });
 }
 
 const uiState = {
@@ -389,6 +488,7 @@ const uiState = {
   statusUntil: 0,
   damageFlash: 0,
   nextVehicleHintAt: 0,
+  nextVehicleImpactAnnounceAt: 0,
   debugEnabled: GAME_CONFIG.debug.enabledByDefault,
   nextDebugRefreshAt: 0,
 };
@@ -430,6 +530,84 @@ const vehicleCameraState = {
   position: new THREE.Vector3(),
   initialized: false,
 };
+
+const ambientTrafficState = {
+  initialized: false,
+};
+
+function initializeAmbientTraffic() {
+  if (ambientTrafficState.initialized) return;
+  const pathData = world.getFreewayTrafficPath ? world.getFreewayTrafficPath() : null;
+  if (!pathData || !Array.isArray(pathData.points) || pathData.points.length < 12) {
+    ambientTrafficState.initialized = true;
+    return;
+  }
+
+  const laneOffsets = Array.isArray(pathData.laneOffsets) && pathData.laneOffsets.length
+    ? pathData.laneOffsets
+    : [-5.1, -1.7, 1.7, 5.1];
+  const perLane = 3;
+  const spacing = 1 / perLane;
+
+  for (let laneIndex = 0; laneIndex < laneOffsets.length; laneIndex++) {
+    for (let i = 0; i < perLane; i++) {
+      const color = laneIndex < 2 ? 0xc7d4e6 : 0xadc6d9;
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(1.7, 0.9, 3.4),
+        new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.2 })
+      );
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      scene.add(mesh);
+      ambientTrafficVehicles.push({
+        mesh,
+        laneOffset: laneOffsets[laneIndex],
+        t: (i * spacing + laneIndex * 0.11) % 1,
+        speed: 0.018 + Math.random() * 0.014,
+      });
+    }
+  }
+
+  ambientTrafficState.initialized = true;
+}
+
+function sampleTrafficPath(points, t) {
+  const wrapped = ((t % 1) + 1) % 1;
+  const scaled = wrapped * points.length;
+  const i0 = Math.floor(scaled) % points.length;
+  const i1 = (i0 + 1) % points.length;
+  const f = scaled - Math.floor(scaled);
+  const p0 = points[i0];
+  const p1 = points[i1];
+  return {
+    x: p0.x + (p1.x - p0.x) * f,
+    y: p0.y + (p1.y - p0.y) * f,
+    z: p0.z + (p1.z - p0.z) * f,
+    tx: p1.x - p0.x,
+    tz: p1.z - p0.z,
+  };
+}
+
+function updateAmbientTraffic(dt) {
+  if (!ambientTrafficState.initialized) initializeAmbientTraffic();
+  if (ambientTrafficVehicles.length === 0) return;
+  const pathData = world.getFreewayTrafficPath ? world.getFreewayTrafficPath() : null;
+  if (!pathData || !Array.isArray(pathData.points) || pathData.points.length < 12) return;
+
+  const points = pathData.points;
+  for (const car of ambientTrafficVehicles) {
+    car.t = (car.t + car.speed * dt) % 1;
+    const sample = sampleTrafficPath(points, car.t);
+    const tangent = new THREE.Vector3(sample.tx, 0, sample.tz).normalize();
+    const right = new THREE.Vector3(tangent.z, 0, -tangent.x).normalize();
+    car.mesh.position.set(
+      sample.x + right.x * car.laneOffset,
+      sample.y + 0.48,
+      sample.z + right.z * car.laneOffset
+    );
+    car.mesh.rotation.y = Math.atan2(tangent.x, tangent.z);
+  }
+}
 
 let audioCtx;
 let masterGain;
@@ -508,11 +686,13 @@ function updateInventoryUI() {
   const alloy = document.getElementById("invAlloy");
   const medkit = document.getElementById("invMedkit");
   const stim = document.getElementById("invStim");
+  const repairKit = document.getElementById("invRepairKit");
   if (scrap) scrap.textContent = String(inventorySystem.resources.scrap);
   if (crystal) crystal.textContent = String(inventorySystem.resources.crystal);
   if (alloy) alloy.textContent = String(inventorySystem.resources.alloy);
   if (medkit) medkit.textContent = String(inventorySystem.consumables.medkit);
   if (stim) stim.textContent = String(inventorySystem.consumables.stim);
+  if (repairKit) repairKit.textContent = String(inventorySystem.consumables.repairKit);
 }
 
 function applyMissionResult(missionResult) {
@@ -542,6 +722,7 @@ setWeaponStatus("Rifle • Ready");
 setWeaponHeat(0, 1);
 setPauseMenuVisible(false);
 setInventoryPanelVisible(false);
+setControlsPanelVisible(false);
 setObjective(missionSystem.getObjectiveText());
 updateInventoryUI();
 
@@ -737,6 +918,76 @@ function updateDriftPuffs(dt) {
   }
 }
 
+function spawnVehicleSmoke(position, stage = "critical") {
+  const radius = stage === "burning" ? 0.26 + Math.random() * 0.15 : 0.18 + Math.random() * 0.1;
+  const smoke = new THREE.Mesh(
+    new THREE.SphereGeometry(radius, 8, 8),
+    new THREE.MeshBasicMaterial({ color: stage === "burning" ? 0x2a2a2a : 0x3a3a3a, transparent: true, opacity: 0.55 })
+  );
+  smoke.position.copy(position).add(
+    new THREE.Vector3((Math.random() - 0.5) * 0.5, 0.85 + Math.random() * 0.4, (Math.random() - 0.5) * 0.5)
+  );
+  scene.add(smoke);
+  vehicleSmokePlumes.push({
+    mesh: smoke,
+    life: stage === "burning" ? 1.05 + Math.random() * 0.55 : 0.8 + Math.random() * 0.45,
+    rise: 0.5 + Math.random() * 0.8,
+    spread: 0.26 + Math.random() * 0.35,
+  });
+}
+
+function updateVehicleSmokePlumes(dt) {
+  for (let i = vehicleSmokePlumes.length - 1; i >= 0; i--) {
+    const plume = vehicleSmokePlumes[i];
+    plume.life -= dt;
+    plume.mesh.position.y += plume.rise * dt;
+    plume.mesh.scale.multiplyScalar(1 + plume.spread * dt);
+    plume.mesh.material.opacity = clamp(plume.life / 1.3, 0, 0.55);
+    if (plume.life <= 0) {
+      scene.remove(plume.mesh);
+      vehicleSmokePlumes.splice(i, 1);
+    }
+  }
+}
+
+function spawnExplosionDebris(origin, count = 14) {
+  for (let i = 0; i < count; i++) {
+    const size = 0.08 + Math.random() * 0.14;
+    const debris = new THREE.Mesh(
+      new THREE.BoxGeometry(size, size, size),
+      new THREE.MeshStandardMaterial({ color: 0x2b2b2b, roughness: 0.82, metalness: 0.12 })
+    );
+    debris.position.copy(origin).add(new THREE.Vector3((Math.random() - 0.5) * 0.7, 0.5 + Math.random() * 0.5, (Math.random() - 0.5) * 0.7));
+    scene.add(debris);
+    explosionDebris.push({
+      mesh: debris,
+      velocity: new THREE.Vector3((Math.random() - 0.5) * 8, 3 + Math.random() * 5, (Math.random() - 0.5) * 8),
+      life: 1.4 + Math.random() * 1.4,
+      spin: new THREE.Vector3((Math.random() - 0.5) * 10, (Math.random() - 0.5) * 10, (Math.random() - 0.5) * 10),
+    });
+  }
+}
+
+function updateExplosionDebris(dt) {
+  for (let i = explosionDebris.length - 1; i >= 0; i--) {
+    const d = explosionDebris[i];
+    d.life -= dt;
+    d.velocity.y -= 12 * dt;
+    d.mesh.position.addScaledVector(d.velocity, dt);
+    d.mesh.rotation.x += d.spin.x * dt;
+    d.mesh.rotation.y += d.spin.y * dt;
+    d.mesh.rotation.z += d.spin.z * dt;
+    if (d.mesh.position.y < world.getHeightAt(d.mesh.position.x, d.mesh.position.z) + 0.04) {
+      d.velocity.multiplyScalar(0.55);
+      d.velocity.y = Math.abs(d.velocity.y) * 0.25;
+    }
+    if (d.life <= 0) {
+      scene.remove(d.mesh);
+      explosionDebris.splice(i, 1);
+    }
+  }
+}
+
 function updateVehicleDriftFeedback(vehicle, dt, elapsed) {
   if (!vehicle || !vehicle.driftState || !vehicle.driftState.active) return;
 
@@ -760,6 +1011,63 @@ function updateVehicleDriftFeedback(vehicle, dt, elapsed) {
     const volume = 0.018 + intensity * 0.03;
     playTone(pitch, 0.045, "sawtooth", volume);
     driftAudioState.nextAt = elapsed + (0.12 - intensity * 0.06);
+  }
+}
+
+function processVehicleExplosionEvents(elapsed) {
+  const events = vehicles.consumeExplosionEvents ? vehicles.consumeExplosionEvents() : [];
+  if (!events || events.length === 0) return;
+
+  for (const event of events) {
+    const radius = Math.max(0.5, Number(event.radius) || 6.5);
+    const maxDamage = Math.max(1, Number(event.maxDamage) || 48);
+    const chainMultiplier = clamp(Number(event.chainVehicleDamageMultiplier) || 0.7, 0.1, 2);
+    const playerMultiplier = clamp(Number(event.playerDamageMultiplier) || 1, 0, 2);
+
+    announce(`${event.label || "Vehicle"} exploded!`, { tone: "danger", priority: 3, hold: 1.2 });
+    spawnExplosionDebris(event.position, 16);
+    playTone(105, 0.22, "sawtooth", 0.15);
+    playTone(62, 0.34, "triangle", 0.1);
+    triggerDamageFlash(0.45);
+
+    const enemyBlast = enemies.applyAreaDamage(
+      event.position,
+      new THREE.Vector3(0, 1, 0),
+      radius,
+      -1,
+      maxDamage * 0.85,
+      elapsed,
+      Infinity
+    );
+    for (const kill of enemyBlast.kills || []) {
+      applyKillRewards(kill.score, kill.xp, `${event.label || "Vehicle"} explosion`, kill.type);
+    }
+
+    for (const other of vehicles.getAllVehicles ? vehicles.getAllVehicles() : []) {
+      if (!other || other.id === event.vehicleId) continue;
+      const dist = other.mesh.position.distanceTo(event.position);
+      if (dist > radius) continue;
+      const falloff = 1 - dist / radius;
+      const dmg = Math.max(0, maxDamage * chainMultiplier * falloff);
+      if (dmg <= 0.05) continue;
+      vehicles.applyDamage(other, dmg, elapsed, { fromExplosion: true });
+    }
+
+    const playerDist = player.position.distanceTo(event.position);
+    if (playerDist <= radius) {
+      const falloff = 1 - playerDist / radius;
+      const dmg = Math.max(0, maxDamage * playerMultiplier * falloff);
+      if (dmg > 0.05) {
+        gameState.health = clamp(gameState.health - dmg, 0, gameState.maxHealth);
+        emitGameEvent("player_damaged", { amount: dmg, source: "vehicle_explosion" });
+        announce(`Explosion shockwave! -${Math.round(dmg)} HP`, {
+          tone: "danger",
+          priority: 2,
+          hold: 1,
+        });
+        triggerDamageFlash(0.55);
+      }
+    }
   }
 }
 
@@ -818,7 +1126,56 @@ function performFlamethrowerAttack(elapsed) {
 
 function performAttack(elapsed) {
   if (gameState.paused) return;
-  if (gameState.inVehicle) return;
+
+  if (gameState.inVehicle) {
+    const activeVehicle = getActiveVehicle();
+    if (!activeVehicle) return;
+    if (elapsed < mountedWeaponState.nextFireAt) return;
+    if (elapsed < mountedWeaponState.overheatUntil) return;
+
+    mountedWeaponState.nextFireAt = elapsed + 1 / Math.max(0.1, mountedWeaponConfig.fireRate);
+    mountedWeaponState.heat = Math.min(
+      mountedWeaponConfig.maxHeat,
+      mountedWeaponState.heat + mountedWeaponConfig.heatPerShot
+    );
+
+    if (mountedWeaponState.heat >= mountedWeaponConfig.maxHeat) {
+      mountedWeaponState.overheatUntil = elapsed + mountedWeaponConfig.overheatDuration;
+      announce("Mounted cannon overheated.", { tone: "warn", priority: 2, hold: 1.1 });
+      playTone(180, 0.14, "sawtooth", 0.09);
+      return;
+    }
+
+    const forward = vehicles.getForwardVector(activeVehicle, aimDirection);
+    const origin = activeVehicle.mesh.position.clone().add(new THREE.Vector3(0, 1.1, 0)).add(forward.clone().multiplyScalar(1.35));
+    const spread = mountedWeaponConfig.spread;
+    const shotDir = forward
+      .clone()
+      .add(new THREE.Vector3((Math.random() - 0.5) * spread, (Math.random() - 0.5) * spread * 0.5, (Math.random() - 0.5) * spread))
+      .normalize();
+
+    const hit = enemies.tryHitFromRay(
+      origin,
+      shotDir,
+      mountedWeaponConfig.range,
+      mountedWeaponConfig.damage,
+      elapsed,
+      mountedWeaponConfig.hitRadius
+    );
+
+    spawnMuzzleFlash(origin, 0x9fd7ff, 1.1);
+    playTone(420, 0.05, "square", 0.06);
+
+    if (hit.hit) {
+      if (hit.killed) {
+        applyKillRewards(hit.score, hit.xp, "Mounted Cannon", hit.type);
+      } else {
+        announce("Mounted hit confirmed.", { tone: "info", priority: 1, hold: 0.6 });
+      }
+    }
+    return;
+  }
+
   if (document.pointerLockElement !== canvas) {
     announce("Click the game to lock mouse before firing.", { tone: "warn", priority: 2, hold: 1.2 });
     return;
@@ -929,6 +1286,16 @@ function performPunch(elapsed) {
 }
 
 function updateWeaponStatus(elapsed) {
+  if (gameState.inVehicle) {
+    if (elapsed < mountedWeaponState.overheatUntil) {
+      setWeaponStatus(`Mounted Cannon • OVERHEAT ${(mountedWeaponState.overheatUntil - elapsed).toFixed(1)}s`);
+      return;
+    }
+    const cd = mountedWeaponState.nextFireAt - elapsed;
+    setWeaponStatus(cd <= 0 ? "Mounted Cannon • Ready" : `Mounted Cannon • Cooldown ${cd.toFixed(2)}s`);
+    return;
+  }
+
   const weapon = weaponDefs[weaponState.activeId] || weaponDefs.rifle;
   const cd = combatState.nextAttackAt - elapsed;
   if (cd <= 0) {
@@ -1042,6 +1409,36 @@ function craftConsumable(type) {
   playTone(640, 0.08, "triangle", 0.09);
 }
 
+function useRepairKit(elapsed) {
+  const targetVehicle = gameState.inVehicle
+    ? getActiveVehicle()
+    : vehicles.getNearestVehicle(player.position, vehicleCombatConfig.repairRange);
+  if (!targetVehicle) {
+    announce("No vehicle in repair range.", { tone: "warn", priority: 1, hold: 1 });
+    return;
+  }
+
+  if (!inventorySystem.consumeConsumable("repairKit", 1)) {
+    announce("No repair kit available.", { tone: "warn", priority: 1, hold: 1 });
+    return;
+  }
+
+  const repair = vehicles.repairVehicle(targetVehicle, vehicleCombatConfig.repairAmount);
+  if (!repair.ok) {
+    inventorySystem.addConsumable("repairKit", 1);
+    announce(`Repair failed: ${repair.reason}`, { tone: "warn", priority: 1, hold: 1.2 });
+    return;
+  }
+
+  updateInventoryUI();
+  const durability = vehicles.getDurability(targetVehicle);
+  announce(
+    `Repair complete: ${targetVehicle.label || "Vehicle"} ${Math.round(durability.health)}/${Math.round(durability.maxHealth)} HP.`,
+    { tone: "good", priority: 2, hold: 1.4 }
+  );
+  playTone(560, 0.12, "triangle", 0.1);
+}
+
 function interactNearestWorldObject(elapsed) {
   const dist = player.position.distanceTo(supplyCache.position);
   if (dist > 3.4) {
@@ -1078,7 +1475,40 @@ function setPaused(shouldPause) {
 
 function updateVehicleScoreLoop(vehicle, dt, elapsed) {
   if (!vehicle || !vehicle.driftState) {
+    setVehicleHealth(0, 0, false);
     setVehicleStatus("On foot");
+    return;
+  }
+
+  const explosionStage = vehicles.getExplosionStage ? vehicles.getExplosionStage(vehicle) : "intact";
+  const durability = vehicles.getDurability ? vehicles.getDurability(vehicle) : null;
+  const hpCurrent =
+    explosionStage === "critical" || explosionStage === "burning" || explosionStage === "exploded" || explosionStage === "wreck"
+      ? 0
+      : Math.max(0, Math.round(durability?.health || 0));
+  const hpMax = Math.max(1, Math.round(durability?.maxHealth || 1));
+  setVehicleHealth(hpCurrent, hpMax, true);
+
+  if (explosionStage === "critical") {
+    setVehicleStatus(`${vehicle.label || "Vehicle"} • CRITICAL • Engine failing`);
+    return;
+  }
+  if (explosionStage === "burning") {
+    setVehicleStatus(`${vehicle.label || "Vehicle"} • BURNING • Evacuate now`);
+    return;
+  }
+  if (explosionStage === "exploded" || explosionStage === "wreck") {
+    setVehicleStatus(`${vehicle.label || "Vehicle"} • WRECKED`);
+    return;
+  }
+
+  const hpText = durability
+    ? `HP ${Math.round(durability.health)}/${Math.round(durability.maxHealth)}`
+    : "HP --";
+
+  if (durability && durability.destroyed) {
+    const recover = Math.max(0, Number(vehicle.destroyedUntil) || 0);
+    setVehicleStatus(`${vehicle.label || "Vehicle"} • DISABLED • ${recover.toFixed(1)}s • ${hpText}`);
     return;
   }
 
@@ -1135,19 +1565,69 @@ function updateVehicleScoreLoop(vehicle, dt, elapsed) {
   const comboText = `x${Math.max(1, Math.floor(vehicleScoreState.combo))}`;
   const bankText = Math.round(vehicleScoreState.bank);
   if (drifting) {
-    setVehicleStatus(`${vehicle.label || "Vehicle"} • Drifting ${comboText} • Bank ${bankText}`);
+    setVehicleStatus(`${vehicle.label || "Vehicle"} • Drifting ${comboText} • Bank ${bankText} • ${hpText}`);
   } else if (vehicleScoreState.bank >= 1 && vehicleScoreState.chainTimeLeft > 0) {
     setVehicleStatus(
-      `${vehicle.label || "Vehicle"} • Chain ${comboText} • Bank ${bankText} • ${vehicleScoreState.chainTimeLeft.toFixed(1)}s`
+      `${vehicle.label || "Vehicle"} • Chain ${comboText} • Bank ${bankText} • ${vehicleScoreState.chainTimeLeft.toFixed(1)}s • ${hpText}`
     );
   } else {
-    setVehicleStatus(speed > 1 ? `${vehicle.label || "Vehicle"} • ${speed.toFixed(1)} m/s` : `${vehicle.label || "Vehicle"} idle`);
+    setVehicleStatus(
+      speed > 1 ? `${vehicle.label || "Vehicle"} • ${speed.toFixed(1)} m/s • ${hpText}` : `${vehicle.label || "Vehicle"} idle • ${hpText}`
+    );
+  }
+}
+
+function updateVehicleEnemyImpacts(vehicle, dt, elapsed) {
+  if (!vehicle) return;
+
+  const stage = vehicles.getExplosionStage ? vehicles.getExplosionStage(vehicle) : "intact";
+  if (stage === "burning" || stage === "exploded" || stage === "wreck") return;
+
+  const impact = enemies.applyVehicleImpact(vehicle, elapsed, {
+    minSpeed: 5,
+    runOverSpeed: 10.5,
+    hitCooldown: 0.45,
+    radius: 1.3,
+  });
+
+  if (!impact || impact.hitCount <= 0) return;
+
+  const bump = clamp(impact.impactStrength || 0.12, 0.08, 0.36);
+  const forward = vehicles.getForwardVector(vehicle);
+  vehicle.mesh.position.addScaledVector(forward, -0.16 * bump);
+  vehicle.speed *= 1 - bump * 0.9;
+
+  for (const kill of impact.kills || []) {
+    applyKillRewards(kill.score, kill.xp, `${vehicle.label || "Vehicle"} run-over`, kill.type);
+  }
+
+  if (impact.nonLethalHits > 0 && elapsed >= uiState.nextVehicleImpactAnnounceAt) {
+    announce("Impact! Enemy hit by vehicle.", { tone: "warn", priority: 1, hold: 0.8 });
+    uiState.nextVehicleImpactAnnounceAt = elapsed + 0.6;
+  }
+
+  playTone(160 + bump * 120, 0.05, "sawtooth", 0.06 + bump * 0.03);
+
+  const selfDamage = impact.hitCount * 1.3 + bump * 12;
+  if (selfDamage > 0) {
+    const damaged = vehicles.applyDamage(vehicle, selfDamage, elapsed, {
+      recoverySeconds: vehicleCombatConfig.destroyRecoverySeconds,
+    });
+    if (damaged.destroyed) {
+      announce(`${vehicle.label || "Vehicle"} disabled by impact!`, { tone: "danger", priority: 3, hold: 1.5 });
+      playTone(120, 0.2, "sawtooth", 0.12);
+    }
   }
 }
 
 function toggleInventoryPanel() {
   gameState.inventoryPanelOpen = !gameState.inventoryPanelOpen;
   setInventoryPanelVisible(gameState.inventoryPanelOpen);
+}
+
+function toggleControlsPanel() {
+  gameState.controlsPanelOpen = !gameState.controlsPanelOpen;
+  setControlsPanelVisible(gameState.controlsPanelOpen);
 }
 
 function buildSaveState() {
@@ -1333,6 +1813,9 @@ function performLoad() {
     typeof loadedPlayerState.activeVehicleId === "string" ? loadedPlayerState.activeVehicleId : null;
 
   const loadedVehicle = getActiveVehicle();
+  const loadedVehicleStage = loadedVehicle && vehicles.getExplosionStage
+    ? vehicles.getExplosionStage(loadedVehicle)
+    : "intact";
 
   const loadedWorldObjects = data.worldObjects || {};
   if (loadedWorldObjects.supplyCache) {
@@ -1340,7 +1823,13 @@ function performLoad() {
     supplyCache.opened = Boolean(loadedCache.opened);
     supplyCache.cooldownUntil = nowElapsed + Math.max(0, numberOr(loadedCache.cooldownRemaining, 0));
   }
-  if (gameState.inVehicle && loadedVehicle) {
+  if (
+    gameState.inVehicle &&
+    loadedVehicle &&
+    loadedVehicleStage !== "burning" &&
+    loadedVehicleStage !== "exploded" &&
+    loadedVehicleStage !== "wreck"
+  ) {
     player.avatarRoot.visible = false;
     player.position.copy(loadedVehicle.mesh.position).add(new THREE.Vector3(0, 1.6, 0));
     vehicleCameraState.initialized = false;
@@ -1362,6 +1851,14 @@ function performLoad() {
     scene.remove(puff.mesh);
   }
   driftPuffs.length = 0;
+  for (const plume of vehicleSmokePlumes) {
+    scene.remove(plume.mesh);
+  }
+  vehicleSmokePlumes.length = 0;
+  for (const debris of explosionDebris) {
+    scene.remove(debris.mesh);
+  }
+  explosionDebris.length = 0;
   driftAudioState.nextAt = 0;
 
   setScore(gameState.score);
@@ -1371,10 +1868,18 @@ function performLoad() {
   updateInventoryUI();
   setObjective(missionSystem.getObjectiveText());
   updateWeaponStatus(clock.elapsedTime);
+  setBlackoutOverlay(0);
+  voidRespawnState.active = false;
+  voidRespawnState.until = 0;
   announce("Game loaded.", { tone: "good", priority: 2, hold: 1.2 });
 }
 
 window.addEventListener("keydown", (e) => {
+  if ((e.code === "ControlLeft" || e.code === "ControlRight") && !e.repeat) {
+    toggleControlsPanel();
+    return;
+  }
+
   if (e.code === "F3") {
     uiState.debugEnabled = !uiState.debugEnabled;
     setDebugOverlayVisible(uiState.debugEnabled);
@@ -1410,6 +1915,10 @@ window.addEventListener("keydown", (e) => {
     craftConsumable("medkit");
   } else if (e.code === "KeyX") {
     craftConsumable("stim");
+  } else if (e.code === "KeyZ") {
+    craftConsumable("repairKit");
+  } else if (e.code === "KeyU") {
+    useRepairKit(clock.elapsedTime);
   } else if (e.code === "Digit1") {
     applyUpgrade(1);
   } else if (e.code === "Digit2") {
@@ -1495,6 +2004,16 @@ function animate() {
   const dt = Math.min(0.05, clock.getDelta());
   const elapsed = clock.elapsedTime;
 
+  if (voidRespawnState.active) {
+    setBlackoutOverlay(1);
+    if (elapsed >= voidRespawnState.until) {
+      completeVoidRespawn();
+    }
+    renderer.render(scene, camera);
+    requestAnimationFrame(animate);
+    return;
+  }
+
   const sniperScoped = weaponState.activeId === "sniperPlayer" && player.isAiming;
   const targetFov = sniperScoped ? 34 : 70;
   camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 8);
@@ -1510,6 +2029,11 @@ function animate() {
       weaponRuntime.heatById[weaponId] = Math.max(0, heat - handling.bloomDecayPerSec * dt);
     }
 
+    mountedWeaponState.heat = Math.max(0, mountedWeaponState.heat - mountedWeaponConfig.coolPerSecond * dt);
+    if (elapsed >= mountedWeaponState.overheatUntil && mountedWeaponState.heat <= mountedWeaponConfig.resumeHeatThreshold) {
+      mountedWeaponState.overheatUntil = 0;
+    }
+
     if (world.updateDoors) {
       world.updateDoors(dt);
     }
@@ -1518,12 +2042,34 @@ function animate() {
       if (!gameState.inVehicle) return null;
       if (vehicleId !== gameState.activeVehicleId) return null;
       return getVehicleControlsFromPlayerKeys();
-    });
+    }, elapsed);
+    vehicles.resolveInterVehicleCollisions?.(gameState.activeVehicleId);
+    processVehicleExplosionEvents(elapsed);
 
     if (gameState.inVehicle) {
       const activeVehicle = getActiveVehicle();
       if (activeVehicle) {
+        const voidLimit = world.worldSize * 0.5 + 12;
+        if (
+          Math.abs(activeVehicle.mesh.position.x) > voidLimit ||
+          Math.abs(activeVehicle.mesh.position.z) > voidLimit ||
+          activeVehicle.mesh.position.y < -28
+        ) {
+          startVoidRespawn(elapsed, "Vehicle left the world");
+        }
+
+        const activeVehicleStage = vehicles.getExplosionStage ? vehicles.getExplosionStage(activeVehicle) : "intact";
+        if (activeVehicleStage === "burning" || activeVehicleStage === "exploded" || activeVehicleStage === "wreck") {
+          exitVehicle();
+          announce("Vehicle catastrophic failure. Auto-eject!", {
+            tone: "danger",
+            priority: 3,
+            hold: 1.2,
+          });
+          triggerDamageFlash(0.35);
+        }
         updateVehicleDriftFeedback(activeVehicle, dt, elapsed);
+        updateVehicleEnemyImpacts(activeVehicle, dt, elapsed);
         updateVehicleScoreLoop(activeVehicle, dt, elapsed);
       }
     } else {
@@ -1564,7 +2110,19 @@ function animate() {
     updateMuzzleFlashes(dt);
     updateFlameBursts(dt);
     updateDriftPuffs(dt);
+    updateVehicleSmokePlumes(dt);
+    updateExplosionDebris(dt);
     if (world.updateTrees) world.updateTrees(dt);
+    updateAmbientTraffic(dt);
+
+    for (const vehicle of vehicles.getAllVehicles ? vehicles.getAllVehicles() : []) {
+      const stage = vehicles.getExplosionStage ? vehicles.getExplosionStage(vehicle) : "intact";
+      if (stage !== "critical" && stage !== "burning") continue;
+      const smokeChance = (stage === "burning" ? 0.85 : 0.48) * dt * 10;
+      if (Math.random() < smokeChance) {
+        spawnVehicleSmoke(vehicle.mesh.position, stage);
+      }
+    }
 
     if (
       !gameState.inVehicle &&
@@ -1572,6 +2130,10 @@ function animate() {
       (weaponState.activeId === "flamethrower" || weaponState.activeId === "smg") &&
       document.pointerLockElement === canvas
     ) {
+      performAttack(elapsed);
+    }
+
+    if (gameState.inVehicle && inputState.primaryDown) {
       performAttack(elapsed);
     }
 
@@ -1597,7 +2159,37 @@ function animate() {
       }
     }
 
-    const enemyResult = enemies.update(dt, elapsed, player.position, { isNight: dayNight.isNight });
+
+    const activeVehicleForDamage = getActiveVehicle();
+    const enemyResult = enemies.update(dt, elapsed, player.position, {
+      isNight: dayNight.isNight,
+      inVehicle: gameState.inVehicle,
+      vehicle: activeVehicleForDamage,
+      vehicleHitRadius: vehicleCombatConfig.projectileHitRadius,
+    });
+
+    if (enemyResult.vehicleDamage > 0 && gameState.inVehicle && activeVehicleForDamage) {
+      const damageResult = vehicles.applyDamage(activeVehicleForDamage, enemyResult.vehicleDamage, elapsed, {
+        recoverySeconds: vehicleCombatConfig.destroyRecoverySeconds,
+      });
+      if (enemyResult.hitVehicleByProjectile) {
+        announce(`Vehicle hit! -${Math.round(enemyResult.vehicleDamage)} durability`, {
+          tone: "danger",
+          priority: 2,
+          hold: 1,
+        });
+      }
+      if (damageResult.destroyed) {
+        announce("Vehicle disabled! Hold position until systems recover.", {
+          tone: "danger",
+          priority: 3,
+          hold: 1.8,
+        });
+        playTone(110, 0.25, "sawtooth", 0.13);
+      }
+      triggerDamageFlash(0.24);
+    }
+
     if (enemyResult.playerDamage > 0) {
       gameState.health = clamp(gameState.health - enemyResult.playerDamage, 0, gameState.maxHealth);
       emitGameEvent("player_damaged", {
@@ -1665,6 +2257,7 @@ function animate() {
       inventorySystem.addResource("alloy", rewards.inventory.alloy);
       inventorySystem.addConsumable("medkit", rewards.inventory.medkit);
       inventorySystem.addConsumable("stim", rewards.inventory.stim);
+      inventorySystem.addConsumable("repairKit", rewards.inventory.repairKit);
       missionSystem.onEvent("collectible_collected", { count: rewards.count });
 
       setScore(gameState.score);
@@ -1690,6 +2283,10 @@ function animate() {
       player.setPosition(0, world.getHeightAtDetailed(0, 0, world.getHeightAt(0, 0)) + 1.6, 0);
       announce("You were downed! Respawned at origin.", { tone: "danger", priority: 3, hold: 2 });
       playTone(120, 0.3, "square", 0.13);
+    }
+
+    if (!gameState.inVehicle && player.position.y < -36) {
+      startVoidRespawn(elapsed, "You fell off the world");
     }
 
     setHealth(gameState.health, gameState.maxHealth);
@@ -1720,14 +2317,20 @@ function animate() {
     }
 
     const activeWeaponId = weaponState.activeId;
-    const activeHandling = weaponHandlingDefs[activeWeaponId] || weaponHandlingDefs.rifle;
-    const activeHeat = weaponRuntime.heatById[activeWeaponId] || 0;
-    setWeaponHeat(activeHeat, activeHandling.maxBloom || 1);
+    let uiHeatValue = 0;
+    if (gameState.inVehicle) {
+      uiHeatValue = mountedWeaponState.heat;
+      setWeaponHeat(uiHeatValue, mountedWeaponConfig.maxHeat || 1);
+    } else {
+      const activeHandling = weaponHandlingDefs[activeWeaponId] || weaponHandlingDefs.rifle;
+      uiHeatValue = weaponRuntime.heatById[activeWeaponId] || 0;
+      setWeaponHeat(uiHeatValue, activeHandling.maxBloom || 1);
+    }
 
     const crosshairMove = Math.min(1, Math.hypot(player.velocity.x, player.velocity.z) / Math.max(0.001, player.sprintSpeed));
     const crosshairSpread =
       3 +
-      activeHeat * 10 +
+      uiHeatValue * 10 +
       crosshairMove * (player.isAiming ? 1.8 : 5.4) +
       (player.locomotionState === "sprint" ? 2.2 : 0);
     setCrosshairSpread(crosshairSpread, player.isAiming);

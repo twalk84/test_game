@@ -23,6 +23,8 @@
     <div class="bar"><div id="weaponHeatBar"></div></div>
     <div class="row">Combat: <span id="combatStatus">Ready</span></div>
     <div class="row">Vehicle: <span id="vehicleStatus">On foot</span></div>
+    <div class="row hidden" id="vehicleHealthRow">Vehicle HP: <span id="vehicleHealthText">0 / 0</span></div>
+    <div class="bar hidden" id="vehicleHealthBarWrap"><div id="vehicleHealthBar"></div></div>
     <div class="row">Effects: <span id="effectsStatus">None</span></div>
     <div class="row hint">Click game to lock mouse</div>
     <div class="row hint">WASD move, Space jump, Shift sprint</div>
@@ -32,7 +34,8 @@
     <div class="row hint">F punch melee attack</div>
     <div class="row hint">K save, L load, R reset save, P pause</div>
     <div class="row hint">I inventory, H use medkit</div>
-    <div class="row hint">J use stim, C craft medkit, X craft stim</div>
+    <div class="row hint">J use stim, U use repair kit (near vehicle)</div>
+    <div class="row hint">C craft medkit, X craft stim, Z craft repair kit</div>
     <div class="row hint">T interact with supply cache</div>
     <div class="row hint">1/2/3 spend upgrade points</div>
     <div class="row hint">F3 debug overlay</div>
@@ -49,7 +52,19 @@
     <div class="row"><strong>Consumables</strong></div>
     <div class="row">Medkit: <span id="invMedkit">0</span></div>
     <div class="row">Stim: <span id="invStim">0</span></div>
+    <div class="row">Repair Kit: <span id="invRepairKit">0</span></div>
     <div class="hint">Press I to close • Press H to use medkit</div>
+  </div>
+
+  <div id="controlsPanel" class="panel hidden">
+    <h3>Controls</h3>
+    <div class="row hint">WASD move, Space jump, Shift sprint</div>
+    <div class="row hint">LMB attack • RMB aim • V swap shoulder</div>
+    <div class="row hint">Q cycle weapon • F melee punch</div>
+    <div class="row hint">E enter/exit vehicle • N boost • B headlights</div>
+    <div class="row hint">Space in vehicle = brake/drift</div>
+    <div class="row hint">I inventory • P pause • K/L save/load</div>
+    <div class="row hint">Ctrl toggles this panel</div>
   </div>
 
   <div id="pauseMenu" class="panel hidden">
@@ -75,6 +90,7 @@
     <span class="crosshair-dot"></span>
   </div>
   <div id="damageOverlay" aria-hidden="true"></div>
+  <div id="blackoutOverlay" aria-hidden="true"></div>
 
   <div id="debugPanel" class="debug-panel hidden" aria-live="polite">
     <pre id="debugText">Debug ready.</pre>

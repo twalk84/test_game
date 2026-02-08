@@ -13,6 +13,7 @@ export class InventorySystem {
     this.consumables = {
       medkit: 0,
       stim: 0,
+      repairKit: 0,
     };
     this.mods = {
       rifleStabilizer: 0,
@@ -70,11 +71,18 @@ export class InventorySystem {
       return { ok: true, crafted: "stim" };
     }
 
+    if (type === "repairKit") {
+      const paid = this.spendResources({ scrap: 5, alloy: 2, crystal: 1 });
+      if (!paid) return { ok: false, reason: "Need 5 scrap + 2 alloy + 1 crystal" };
+      this.addConsumable("repairKit", 1);
+      return { ok: true, crafted: "repairKit" };
+    }
+
     return { ok: false, reason: "Unknown recipe" };
   }
 
   getSummaryText() {
-    return `Scrap ${this.resources.scrap} • Crystal ${this.resources.crystal} • Alloy ${this.resources.alloy} • Medkit ${this.consumables.medkit} • Stim ${this.consumables.stim}`;
+    return `Scrap ${this.resources.scrap} • Crystal ${this.resources.crystal} • Alloy ${this.resources.alloy} • Medkit ${this.consumables.medkit} • Stim ${this.consumables.stim} • Repair ${this.consumables.repairKit}`;
   }
 
   getSaveState() {
@@ -88,7 +96,7 @@ export class InventorySystem {
   applySaveState(saved) {
     if (!saved) {
       this.resources = { scrap: 0, crystal: 0, alloy: 0 };
-      this.consumables = { medkit: 0, stim: 0 };
+      this.consumables = { medkit: 0, stim: 0, repairKit: 0 };
       this.mods = { rifleStabilizer: 0, pulseCapacitor: 0 };
       return;
     }
@@ -106,6 +114,7 @@ export class InventorySystem {
     this.consumables = {
       medkit: Math.max(0, numberOr(consumables.medkit, 0)),
       stim: Math.max(0, numberOr(consumables.stim, 0)),
+      repairKit: Math.max(0, numberOr(consumables.repairKit, 0)),
     };
 
     this.mods = {

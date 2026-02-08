@@ -11,6 +11,10 @@ export class PlayerController {
       typeof options.resolveHorizontalCollision === "function"
         ? options.resolveHorizontalCollision
         : null;
+    this.resolveExternalCollision =
+      typeof options.resolveExternalCollision === "function"
+        ? options.resolveExternalCollision
+        : null;
     this.getCameraTuningForPosition =
       typeof options.getCameraTuningForPosition === "function"
         ? options.getCameraTuningForPosition
@@ -123,6 +127,14 @@ export class PlayerController {
       ],
     };
     this.lastRecoilPatternIndex = 0;
+    this.externalAvatarUrl = options.avatarUrl || "./assets/player_realistic.glb";
+    this.externalAvatarLoaderUrl =
+      options.avatarLoaderUrl ||
+      "https://unpkg.com/three@0.161.0/examples/jsm/loaders/GLTFLoader.js";
+    this.avatarMixer = null;
+    this.avatarActions = Object.create(null);
+    this.activeAvatarActionKey = null;
+    this.usingExternalAvatar = false;
     this.punchState = {
       active: false,
       hand: "right",
@@ -137,6 +149,7 @@ export class PlayerController {
     this.avatarParts = avatar.parts;
     this.avatarRoot.position.copy(this.position).add(new THREE.Vector3(0, -this.height, 0));
     this.weaponRig = this._createWeaponRig();
+    this._tryLoadExternalAvatar(options.scene);
 
     this._setupInput();
   }
@@ -154,13 +167,160 @@ export class PlayerController {
     mount.add(gun.root);
 
     gun.root.rotation.set(0.05, 0, 0);
-    this.avatarRoot.add(mount);
-
-    return {
+    const rig = {
       mount,
       root: gun.root,
       muzzle: gun.muzzle,
     };
+    this._attachWeaponRigToAvatar(rig, false);
+    return rig;
+  }
+
+  _findAvatarNodeByNames(nameHints = []) {
+    if (!this.avatarRoot) return null;
+    const normalizedHints = nameHints.map((v) => String(v || "").toLowerCase());
+    let found = null;
+    this.avatarRoot.traverse((obj) => {
+      if (found) return;
+      const n = String(obj.name || "").toLowerCase();
+      if (!n) return;
+      for (const hint of normalizedHints) {
+        if (hint && n.includes(hint)) {
+          found = obj;
+          break;
+        }
+      }
+    });
+    return found;
+  }
+
+  _attachWeaponRigToAvatar(rig = this.weaponRig, resetForSocket = false) {
+    if (!rig || !this.avatarRoot) return;
+    const mount = rig.mount;
+    if (mount.parent) mount.parent.remove(mount);
+
+    const socket = this._findAvatarNodeByNames([
+      "weapon_socket",
+      "weaponsocket",
+      "hand.r",
+      "hand_r",
+      "r_hand",
+      "righthand",
+    ]);
+
+    if (socket) {
+      socket.add(mount);
+      if (resetForSocket) {
+        mount.position.set(0, 0, 0);
+        mount.rotation.set(0, 0, 0);
+      }
+      return;
+    }
+
+    this.avatarRoot.add(mount);
+    mount.position.set(0.38, 1.36, 0.16);
+    mount.rotation.set(-0.14, -0.02, -0.15);
+  }
+
+  _setupAvatarAnimations(animations = []) {
+    this.avatarMixer = null;
+    this.avatarActions = Object.create(null);
+    this.activeAvatarActionKey = null;
+    if (!this.avatarRoot || !Array.isArray(animations) || animations.length === 0) return;
+
+    this.avatarMixer = new THREE.AnimationMixer(this.avatarRoot);
+    for (const clip of animations) {
+      if (!clip || !clip.name) continue;
+      const key = clip.name.toLowerCase().trim().replace(/\s+/g, "_");
+      const action = this.avatarMixer.clipAction(clip);
+      action.enabled = true;
+      action.clampWhenFinished = false;
+      action.setLoop(THREE.LoopRepeat, Infinity);
+      this.avatarActions[key] = action;
+    }
+  }
+
+  _pickExternalActionKey(stateName = "idle") {
+    const keys = Object.keys(this.avatarActions || {});
+    if (keys.length === 0) return null;
+    const state = String(stateName || "idle").toLowerCase();
+    const compact = state.replace(/[^a-z0-9]/g, "");
+
+    if (this.avatarActions[state]) return state;
+    for (const key of keys) {
+      if (key.replace(/[^a-z0-9]/g, "") === compact) return key;
+    }
+    for (const key of keys) {
+      if (key.includes(compact)) return key;
+    }
+
+    if (state.startsWith("aim")) {
+      if (this.avatarActions.aim_idle) return "aim_idle";
+      if (this.avatarActions.aim_move) return "aim_move";
+    }
+    if (this.avatarActions.idle) return "idle";
+    return keys[0] || null;
+  }
+
+  _setExternalAction(key, fade = 0.14) {
+    if (!this.avatarMixer || !key || !this.avatarActions[key]) return;
+    if (this.activeAvatarActionKey === key) return;
+
+    const next = this.avatarActions[key];
+    const prev = this.activeAvatarActionKey ? this.avatarActions[this.activeAvatarActionKey] : null;
+    if (prev && prev !== next) prev.fadeOut(fade);
+    next.reset().fadeIn(fade).play();
+    this.activeAvatarActionKey = key;
+  }
+
+  _tryLoadExternalAvatar(scene) {
+    if (!scene || !this.externalAvatarUrl) return;
+    import(this.externalAvatarLoaderUrl)
+      .then((mod) => {
+        const LoaderClass = mod && mod.GLTFLoader;
+        if (!LoaderClass) return;
+        const loader = new LoaderClass();
+        loader.load(
+          this.externalAvatarUrl,
+          (gltf) => {
+            if (!gltf || !gltf.scene) return;
+            const previous = this.avatarRoot;
+            const nextRoot = gltf.scene;
+
+            nextRoot.traverse((obj) => {
+              if (!obj.isMesh) return;
+              obj.castShadow = true;
+              obj.receiveShadow = true;
+            });
+
+            const bb = new THREE.Box3().setFromObject(nextRoot);
+            const height = Math.max(0.0001, bb.max.y - bb.min.y);
+            const desiredHeight = 1.95;
+            const s = desiredHeight / height;
+            nextRoot.scale.setScalar(s);
+
+            nextRoot.position.copy(previous.position);
+            nextRoot.rotation.copy(previous.rotation);
+            nextRoot.visible = previous.visible;
+
+            scene.add(nextRoot);
+            if (previous.parent) previous.parent.remove(previous);
+
+            this.avatarRoot = nextRoot;
+            this.avatarParts = null;
+            this.usingExternalAvatar = true;
+            this._setupAvatarAnimations(gltf.animations || []);
+            this._attachWeaponRigToAvatar(this.weaponRig, true);
+          },
+          undefined,
+          () => {
+            // Fallback silently to procedural avatar if GLB is missing.
+          }
+        );
+      })
+      .catch(() => {
+        // If loader module fails (offline/CDN blocked), keep fallback avatar.
+      });
   }
 
   _createAvatar(scene) {
@@ -388,6 +548,15 @@ export class PlayerController {
       this.visualYaw += delta * Math.min(1, dt * 14);
     }
     this.avatarRoot.rotation.y = this.visualYaw;
+
+    if (this.usingExternalAvatar) {
+      if (this.avatarMixer) {
+        const key = this._pickExternalActionKey(this.locomotionState);
+        this._setExternalAction(key, 0.12);
+        this.avatarMixer.update(dt);
+      }
+      return;
+    }
 
     if (!this.avatarParts) return;
 
@@ -641,8 +810,8 @@ export class PlayerController {
     this.moveDir.set(0, 0, 0);
     if (this.keys.has("KeyW")) this.moveDir.add(forward);
     if (this.keys.has("KeyS")) this.moveDir.sub(forward);
-    if (this.keys.has("KeyD")) this.moveDir.add(right);
-    if (this.keys.has("KeyA")) this.moveDir.sub(right);
+    if (this.keys.has("KeyA")) this.moveDir.add(right);
+    if (this.keys.has("KeyD")) this.moveDir.sub(right);
 
     if (this.moveDir.lengthSq() > 0) this.moveDir.normalize();
 
@@ -689,6 +858,10 @@ export class PlayerController {
       );
     }
 
+    if (this.resolveExternalCollision) {
+      this.resolveExternalCollision(this.position, 0.42, this);
+    }
+
     const groundY = this.getHeightAtDetailed(this.position.x, this.position.z, this.position.y - this.height) + this.height;
     const preClampYVel = this.velocity.y;
     const aboveGround = this.position.y - groundY;
@@ -712,10 +885,6 @@ export class PlayerController {
     } else {
       this.onGround = false;
     }
-
-    const maxWorld = 107;
-    this.position.x = Math.max(-maxWorld, Math.min(maxWorld, this.position.x));
-    this.position.z = Math.max(-maxWorld, Math.min(maxWorld, this.position.z));
 
     const speedNorm = Math.min(1, Math.hypot(this.velocity.x, this.velocity.z) / Math.max(0.001, this.sprintSpeed));
     const nextLocomotion = this._resolveLocomotionState({

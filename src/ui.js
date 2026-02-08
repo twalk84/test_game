@@ -29,6 +29,13 @@ export function setDamageOverlay(intensity = 0) {
   overlay.style.opacity = clamped.toFixed(3);
 }
 
+export function setBlackoutOverlay(intensity = 0) {
+  const overlay = document.getElementById("blackoutOverlay");
+  if (!overlay) return;
+  const clamped = Math.max(0, Math.min(1, Number(intensity) || 0));
+  overlay.style.opacity = clamped.toFixed(3);
+}
+
 export function setSniperScopeActive(active) {
   document.body.classList.toggle("sniper-scope", Boolean(active));
 }
@@ -84,6 +91,24 @@ export function setVehicleStatus(text) {
   if (vehicleEl) vehicleEl.textContent = text;
 }
 
+export function setVehicleHealth(current = 0, max = 0, visible = false) {
+  const row = document.getElementById("vehicleHealthRow");
+  const wrap = document.getElementById("vehicleHealthBarWrap");
+  const text = document.getElementById("vehicleHealthText");
+  const bar = document.getElementById("vehicleHealthBar");
+
+  const show = Boolean(visible) && Number(max) > 0;
+  if (row) row.classList.toggle("hidden", !show);
+  if (wrap) wrap.classList.toggle("hidden", !show);
+
+  const safeMax = Math.max(1, Number(max) || 1);
+  const safeCurrent = Math.max(0, Math.min(safeMax, Number(current) || 0));
+  const pct = safeCurrent / safeMax;
+
+  if (text) text.textContent = `${Math.round(safeCurrent)} / ${Math.round(safeMax)}`;
+  if (bar) bar.style.width = `${Math.round(pct * 100)}%`;
+}
+
 export function setWeaponStatus(text) {
   const weaponEl = document.getElementById("weaponStatus");
   if (weaponEl) weaponEl.textContent = text;
@@ -109,6 +134,12 @@ export function setPauseMenuVisible(visible) {
   const menu = document.getElementById("pauseMenu");
   if (!menu) return;
   menu.classList.toggle("hidden", !visible);
+}
+
+export function setControlsPanelVisible(visible) {
+  const panel = document.getElementById("controlsPanel");
+  if (!panel) return;
+  panel.classList.toggle("hidden", !visible);
 }
 
 export function setDebugOverlayVisible(visible) {
