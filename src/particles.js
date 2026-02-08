@@ -1,6 +1,7 @@
 import * as THREE from "https://unpkg.com/three@0.161.0/build/three.module.js";
 
 const MAX_PARTICLES = 2000;
+const DEAD_Y = -9999;
 
 export class ParticleSystem {
   constructor(scene) {
@@ -16,9 +17,12 @@ export class ParticleSystem {
     this.maxLives = new Float32Array(MAX_PARTICLES);   // total lifetime
     this.gravities = new Float32Array(MAX_PARTICLES);  // per-particle gravity
 
-    // All particles start dead (life <= 0)
+    // All particles start dead — position off-screen
     this.lives.fill(0);
     this.sizes.fill(0);
+    for (let i = 0; i < MAX_PARTICLES; i++) {
+      this.positions[i * 3 + 1] = DEAD_Y;
+    }
     this.nextFree = 0;
 
     const geometry = new THREE.BufferGeometry();
@@ -164,13 +168,26 @@ export class ParticleSystem {
 
     for (let i = 0; i < MAX_PARTICLES; i++) {
       if (this.lives[i] <= 0) {
-        // Keep dead particles invisible (size 0)
-        sizeAttr.array[i] = 0;
+        // Move dead particles off-screen (PointsMaterial ignores per-vertex size)
+        const i3 = i * 3;
+        posAttr.array[i3 + 1] = DEAD_Y;
+        colAttr.array[i3] = 0;
+        colAttr.array[i3 + 1] = 0;
+        colAttr.array[i3 + 2] = 0;
         continue;
       }
 
       this.lives[i] -= dt;
       const i3 = i * 3;
+
+      if (this.lives[i] <= 0) {
+        // Just died this frame — move off-screen immediately
+        posAttr.array[i3 + 1] = DEAD_Y;
+        colAttr.array[i3] = 0;
+        colAttr.array[i3 + 1] = 0;
+        colAttr.array[i3 + 2] = 0;
+        continue;
+      }
 
       // Apply gravity
       this.velocities[i3 + 1] -= this.gravities[i] * dt;
@@ -180,14 +197,11 @@ export class ParticleSystem {
       this.positions[i3 + 1] += this.velocities[i3 + 1] * dt;
       this.positions[i3 + 2] += this.velocities[i3 + 2] * dt;
 
-      // Fade: size shrinks as life runs out
+      // Fade color toward darker as life runs out
       const lifeRatio = Math.max(0, this.lives[i] / this.maxLives[i]);
-      sizeAttr.array[i] = this.sizes[i] * lifeRatio;
-
-      // Fade color toward darker
-      colAttr.array[i3] *= (1 - dt * 0.5);
-      colAttr.array[i3 + 1] *= (1 - dt * 0.5);
-      colAttr.array[i3 + 2] *= (1 - dt * 0.5);
+      colAttr.array[i3] = this.colors[i3] * lifeRatio;
+      colAttr.array[i3 + 1] = this.colors[i3 + 1] * lifeRatio;
+      colAttr.array[i3 + 2] = this.colors[i3 + 2] * lifeRatio;
     }
 
     posAttr.needsUpdate = true;

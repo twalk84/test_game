@@ -5,7 +5,16 @@
       "Bash(findstr:*)",
       "Bash(timeout:*)",
       "Bash(powershell -Command:*)",
-      "Bash(node server.js:*)"
+      "Bash(node server.js:*)",
+      "Bash(powershell -Command \"\\(Invoke-WebRequest -Uri http://127.0.0.1:8084/src/particles.js -UseBasicParsing\\).StatusCode; \\(Invoke-WebRequest -Uri http://127.0.0.1:8084/src/world.js -UseBasicParsing\\).StatusCode; \\(Invoke-WebRequest -Uri http://127.0.0.1:8084/src/main.js -UseBasicParsing\\).StatusCode; \\(Invoke-WebRequest -Uri http://127.0.0.1:8084/src/enemies.js -UseBasicParsing\\).StatusCode\")",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(node -e \"const http=require\\(''http''\\);[''src/main.js'',''src/abilities.js'',''src/loot.js'',''src/enemies.js'',''src/player.js'',''src/config.js'',''src/ui.js'',''index.html''].forEach\\(f=>{http.get\\(''http://localhost:3000/''+f,r=>{console.log\\(r.statusCode+'' ''+f\\)}\\).on\\(''error'',e=>console.log\\(''ERR ''+f+'' ''+e.message\\)\\)}\\)\")",
+      "Bash(node -e \"const http=require\\(''http''\\);[''src/main.js'',''src/abilities.js'',''src/loot.js'',''src/enemies.js'',''src/player.js'',''src/config.js'',''src/ui.js'',''index.html''].forEach\\(f=>{http.get\\(''http://127.0.0.1:8080/''+f,r=>{console.log\\(r.statusCode+'' ''+f\\)}\\).on\\(''error'',e=>console.log\\(''ERR ''+f+'' ''+e.message\\)\\)}\\)\")",
+      "Bash(curl:*)",
+      "Bash(for f in src/weather.js src/biomes.js src/bosses.js src/quests.js src/soundDesign.js src/spatialGrid.js src/save.js src/main.js src/ui.js index.html)",
+      "Bash(do echo -n \"$f: \")",
+      "Bash(done)"
     ]
   }
 }

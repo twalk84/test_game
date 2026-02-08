@@ -1104,6 +1104,12 @@ function animate() {
       deathTimestamp = performance.now();
       playTonePreset("death");
       events.emit("player-died");
+      // Clean up all projectiles so they don't freeze in place
+      for (const projectile of playerProjectiles) {
+        cleanupProjectile(projectile);
+      }
+      playerProjectiles.length = 0;
+      enemies.clearProjectiles();
       if (document.pointerLockElement === canvas) {
         document.exitPointerLock();
       }

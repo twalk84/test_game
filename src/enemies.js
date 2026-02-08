@@ -527,4 +527,11 @@ export class EnemySystem {
     }
     this.projectiles = [];
   }
+
+  clearProjectiles() {
+    for (const projectile of this.projectiles) {
+      this._cleanupProjectile(projectile);
+    }
+    this.projectiles = [];
+  }
 }
