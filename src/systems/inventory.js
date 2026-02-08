@@ -8,9 +8,11 @@ export class InventorySystem {
     this.resources = {
       scrap: 0,
       crystal: 0,
+      alloy: 0,
     };
     this.consumables = {
       medkit: 0,
+      stim: 0,
     };
     this.mods = {
       rifleStabilizer: 0,
@@ -36,8 +38,43 @@ export class InventorySystem {
     return true;
   }
 
+  canAfford(cost = {}) {
+    for (const [resource, amount] of Object.entries(cost)) {
+      const needed = Math.max(0, numberOr(amount, 0));
+      const have = numberOr(this.resources[resource], 0);
+      if (have < needed) return false;
+    }
+    return true;
+  }
+
+  spendResources(cost = {}) {
+    if (!this.canAfford(cost)) return false;
+    for (const [resource, amount] of Object.entries(cost)) {
+      this.resources[resource] = Math.max(0, numberOr(this.resources[resource], 0) - Math.max(0, numberOr(amount, 0)));
+    }
+    return true;
+  }
+
+  craftConsumable(type) {
+    if (type === "medkit") {
+      const paid = this.spendResources({ scrap: 4, crystal: 1 });
+      if (!paid) return { ok: false, reason: "Need 4 scrap + 1 crystal" };
+      this.addConsumable("medkit", 1);
+      return { ok: true, crafted: "medkit" };
+    }
+
+    if (type === "stim") {
+      const paid = this.spendResources({ scrap: 3, alloy: 1 });
+      if (!paid) return { ok: false, reason: "Need 3 scrap + 1 alloy" };
+      this.addConsumable("stim", 1);
+      return { ok: true, crafted: "stim" };
+    }
+
+    return { ok: false, reason: "Unknown recipe" };
+  }
+
   getSummaryText() {
-    return `Scrap ${this.resources.scrap} • Crystal ${this.resources.crystal} • Medkit ${this.consumables.medkit}`;
+    return `Scrap ${this.resources.scrap} • Crystal ${this.resources.crystal} • Alloy ${this.resources.alloy} • Medkit ${this.consumables.medkit} • Stim ${this.consumables.stim}`;
   }
 
   getSaveState() {
@@ -50,8 +87,8 @@ export class InventorySystem {
 
   applySaveState(saved) {
     if (!saved) {
-      this.resources = { scrap: 0, crystal: 0 };
-      this.consumables = { medkit: 0 };
+      this.resources = { scrap: 0, crystal: 0, alloy: 0 };
+      this.consumables = { medkit: 0, stim: 0 };
       this.mods = { rifleStabilizer: 0, pulseCapacitor: 0 };
       return;
     }
@@ -63,10 +100,12 @@ export class InventorySystem {
     this.resources = {
       scrap: Math.max(0, numberOr(resources.scrap, 0)),
       crystal: Math.max(0, numberOr(resources.crystal, 0)),
+      alloy: Math.max(0, numberOr(resources.alloy, 0)),
     };
 
     this.consumables = {
       medkit: Math.max(0, numberOr(consumables.medkit, 0)),
+      stim: Math.max(0, numberOr(consumables.stim, 0)),
     };
 
     this.mods = {

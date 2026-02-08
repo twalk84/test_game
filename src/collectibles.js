@@ -30,7 +30,7 @@ export class CollectibleSystem {
           emissive: 0x332200,
           color: new THREE.Color().setHSL(0.13 + Math.random() * 0.18, 0.8, 0.56),
           geom: commonGeom,
-          inventory: { scrap: 1, crystal: 0, medkit: 0 },
+          inventory: { scrap: 1, crystal: 0, alloy: 0, medkit: 0, stim: 0 },
         },
         rare: {
           score: 3,
@@ -39,7 +39,7 @@ export class CollectibleSystem {
           emissive: 0x1f1f44,
           color: new THREE.Color().setHSL(0.55 + Math.random() * 0.08, 0.78, 0.62),
           geom: rareGeom,
-          inventory: { scrap: 0, crystal: 2, medkit: 0 },
+          inventory: { scrap: 0, crystal: 2, alloy: 1, medkit: 0, stim: 0 },
         },
         heal: {
           score: 2,
@@ -49,7 +49,7 @@ export class CollectibleSystem {
           emissive: 0x13331a,
           color: new THREE.Color().setHSL(0.32 + Math.random() * 0.06, 0.75, 0.58),
           geom: healGeom,
-          inventory: { scrap: 0, crystal: 0, medkit: 1 },
+          inventory: { scrap: 0, crystal: 0, alloy: 0, medkit: 1, stim: Math.random() < 0.22 ? 1 : 0 },
         },
       }[type];
 
@@ -101,7 +101,9 @@ export class CollectibleSystem {
       inventory: {
         scrap: 0,
         crystal: 0,
+        alloy: 0,
         medkit: 0,
+        stim: 0,
       },
     };
 
@@ -131,7 +133,9 @@ export class CollectibleSystem {
         rewards.heal += item.heal;
         rewards.inventory.scrap += item.inventory?.scrap || 0;
         rewards.inventory.crystal += item.inventory?.crystal || 0;
+        rewards.inventory.alloy += item.inventory?.alloy || 0;
         rewards.inventory.medkit += item.inventory?.medkit || 0;
+        rewards.inventory.stim += item.inventory?.stim || 0;
         if (item.type === "rare") rewards.rareCount += 1;
       }
     }

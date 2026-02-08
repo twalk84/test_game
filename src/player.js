@@ -1,5 +1,6 @@
 import * as THREE from "https://unpkg.com/three@0.161.0/build/three.module.js";
 import { createTacticalRifleModel } from "./weaponModels.js";
+import { GAME_CONFIG } from "./config.js";
 
 export class PlayerController {
   constructor(camera, getHeightAt, options = {}) {
@@ -19,6 +20,7 @@ export class PlayerController {
         ? options.constrainCameraPosition
         : null;
     this.options = options;
+    this.characterConfig = GAME_CONFIG.character;
 
     this.position = new THREE.Vector3(0, 6, 0);
     this.velocity = new THREE.Vector3();
@@ -63,8 +65,64 @@ export class PlayerController {
     this.walkCycle = 0;
     this.moveBlend = 0;
     this.groundStickDistance = 0.35;
-    this.groundDrag = 7;
+    this.groundDrag = this.characterConfig.movement.groundDrag;
     this.elapsed = 0;
+    this.locomotionState = "idle";
+    this.previousLocomotionState = "idle";
+    this.locomotionStateTime = 0;
+    this.stateBlend = 1;
+    this.landingRecoverUntil = 0;
+    this.aimBlend = 0;
+    this.fireRecoil = 0;
+    this.cameraKick = {
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+    };
+    this.cameraLandingImpulse = 0;
+    this.cameraSway = { x: 0, y: 0 };
+    this.lastCameraKickProfile = "default";
+    this.recoilPatternState = new Map();
+    this.recoilPatterns = {
+      default: [
+        { x: 0.0, y: 1.0 },
+        { x: 0.25, y: 1.08 },
+        { x: -0.2, y: 1.16 },
+        { x: 0.18, y: 1.22 },
+      ],
+      rifle: [
+        { x: 0.08, y: 1.0 },
+        { x: 0.2, y: 1.08 },
+        { x: -0.12, y: 1.14 },
+        { x: 0.16, y: 1.2 },
+        { x: -0.18, y: 1.24 },
+      ],
+      smg: [
+        { x: 0.18, y: 0.72 },
+        { x: -0.16, y: 0.76 },
+        { x: 0.22, y: 0.8 },
+        { x: -0.2, y: 0.84 },
+        { x: 0.16, y: 0.88 },
+        { x: -0.12, y: 0.92 },
+      ],
+      shotgun: [
+        { x: 0.05, y: 1.28 },
+        { x: -0.04, y: 1.18 },
+        { x: 0.03, y: 1.1 },
+      ],
+      sniper: [
+        { x: 0.01, y: 1.8 },
+        { x: -0.01, y: 1.65 },
+      ],
+      flamethrower: [
+        { x: 0.1, y: 0.34 },
+        { x: -0.08, y: 0.36 },
+        { x: 0.07, y: 0.38 },
+        { x: -0.06, y: 0.4 },
+      ],
+    };
+    this.lastRecoilPatternIndex = 0;
     this.punchState = {
       active: false,
       hand: "right",
@@ -334,16 +392,50 @@ export class PlayerController {
     if (!this.avatarParts) return;
 
     const horizontalSpeed = Math.hypot(this.velocity.x, this.velocity.z);
-    const moveTarget = hasMoveInput ? 1 : 0;
-    this.moveBlend += (moveTarget - this.moveBlend) * Math.min(1, dt * 10);
-    this.walkCycle += dt * (2.1 + horizontalSpeed * 1.05) * (0.25 + this.moveBlend * 1.2);
+    const speedNorm = Math.min(1, horizontalSpeed / Math.max(0.001, this.sprintSpeed));
+    const stateBlendSpeed = 7;
+    this.stateBlend = Math.min(1, this.stateBlend + dt * stateBlendSpeed);
 
-    const swing = Math.sin(this.walkCycle) * 0.68 * this.moveBlend;
+    const stateProfiles = {
+      idle: { torsoLean: 0, armSwing: 0.06, legSwing: 0.28, weaponDrop: 0, weaponRoll: 0.02 },
+      walk: { torsoLean: 0.02, armSwing: 0.14, legSwing: 0.45, weaponDrop: 0.006, weaponRoll: 0.03 },
+      jog: { torsoLean: 0.05, armSwing: 0.2, legSwing: 0.62, weaponDrop: 0.012, weaponRoll: 0.038 },
+      sprint: { torsoLean: 0.11, armSwing: 0.24, legSwing: 0.82, weaponDrop: 0.02, weaponRoll: 0.048 },
+      jump: { torsoLean: 0.08, armSwing: 0.1, legSwing: 0.2, weaponDrop: 0.016, weaponRoll: 0.028 },
+      fall: { torsoLean: 0.06, armSwing: 0.08, legSwing: 0.16, weaponDrop: 0.014, weaponRoll: 0.022 },
+      land: { torsoLean: 0.12, armSwing: 0.08, legSwing: 0.24, weaponDrop: 0.02, weaponRoll: 0.02 },
+      aim_idle: { torsoLean: 0.01, armSwing: 0.02, legSwing: 0.12, weaponDrop: -0.01, weaponRoll: 0.012 },
+      aim_move: { torsoLean: 0.04, armSwing: 0.08, legSwing: 0.28, weaponDrop: -0.006, weaponRoll: 0.018 },
+    };
+    const stateProfile = stateProfiles[this.locomotionState] || stateProfiles.idle;
+    const priorProfile = stateProfiles[this.previousLocomotionState] || stateProfiles.idle;
+    const blend = this.stateBlend;
+    const lerpState = (key) => THREE.MathUtils.lerp(priorProfile[key], stateProfile[key], blend);
+
+    const stateArmSwing = lerpState("armSwing");
+    const stateLegSwing = lerpState("legSwing");
+    const stateTorsoLean = lerpState("torsoLean");
+    const stateWeaponDrop = lerpState("weaponDrop");
+    const stateWeaponRoll = lerpState("weaponRoll");
+    const moveTarget = hasMoveInput ? 1 : 0;
+    this.moveBlend +=
+      (moveTarget - this.moveBlend) * Math.min(1, dt * this.characterConfig.animation.locomotionBlendSpeed);
+    this.aimBlend +=
+      ((this.isAiming ? 1 : 0) - this.aimBlend) * Math.min(1, dt * this.characterConfig.animation.aimBlendSpeed);
+    this.fireRecoil = Math.max(0, this.fireRecoil - dt * 6.5);
+
+    this.walkCycle +=
+      dt *
+      (this.characterConfig.animation.walkCycleBase +
+        horizontalSpeed * this.characterConfig.animation.walkCycleSpeedFactor) *
+      (0.25 + this.moveBlend * 1.2);
+
+    const swing = Math.sin(this.walkCycle) * (0.45 + stateLegSwing) * this.moveBlend;
     const kneeBendL = Math.max(0, Math.sin(this.walkCycle + Math.PI * 0.5)) * 0.4 * this.moveBlend;
     const kneeBendR = Math.max(0, Math.sin(this.walkCycle + Math.PI * 1.5)) * 0.4 * this.moveBlend;
 
-    const armSwing = swing * 0.22;
-    const aimDownSights = this.isAiming ? 1 : 0;
+    const armSwing = swing * (0.1 + stateArmSwing);
+    const aimDownSights = this.aimBlend;
     const holdBlend = 0.65 + aimDownSights * 0.35;
     const punch = this.punchState;
     const punchT = punch.active
@@ -352,30 +444,107 @@ export class PlayerController {
     const punchWave = punch.active ? Math.sin(punchT * Math.PI) : 0;
     const isRightPunch = punch.hand === "right";
 
-    this.avatarParts.shoulderR.rotation.x = -0.92 * holdBlend + armSwing + (isRightPunch ? punchWave * 0.95 : 0);
+    this.avatarParts.shoulderR.rotation.x =
+      -0.92 * holdBlend + armSwing + (isRightPunch ? punchWave * 0.95 : 0) - this.fireRecoil * 0.12;
     this.avatarParts.shoulderR.rotation.y = -0.12;
     this.avatarParts.shoulderR.rotation.z = -0.08;
     this.avatarParts.forearmR.rotation.x = -0.58 * holdBlend + armSwing * 0.5 + (isRightPunch ? punchWave * 0.45 : 0);
 
-    this.avatarParts.shoulderL.rotation.x = -0.76 * holdBlend - armSwing + (!isRightPunch ? punchWave * 0.95 : 0);
+    this.avatarParts.shoulderL.rotation.x =
+      -0.76 * holdBlend - armSwing + (!isRightPunch ? punchWave * 0.95 : 0) - this.fireRecoil * 0.08;
     this.avatarParts.shoulderL.rotation.y = 0.26;
     this.avatarParts.shoulderL.rotation.z = 0.15;
     this.avatarParts.forearmL.rotation.x = -0.94 * holdBlend - armSwing * 0.35 + (!isRightPunch ? punchWave * 0.45 : 0);
 
-    this.avatarParts.hipL.rotation.x = -swing;
-    this.avatarParts.hipR.rotation.x = swing;
+    this.avatarParts.hipL.rotation.x = -swing - stateTorsoLean * 0.12;
+    this.avatarParts.hipR.rotation.x = swing - stateTorsoLean * 0.12;
     this.avatarParts.shinL.rotation.x = kneeBendL;
     this.avatarParts.shinR.rotation.x = kneeBendR;
 
-    this.avatarParts.torso.position.y = 1.2 + Math.sin(this.walkCycle * 2) * 0.03 * this.moveBlend;
+    const torsoYawTarget =
+      THREE.MathUtils.clamp(this.yaw - this.visualYaw, -0.6, 0.6) * (0.2 + this.aimBlend * 0.7) - stateTorsoLean;
+    this.avatarParts.torso.rotation.y +=
+      (torsoYawTarget - this.avatarParts.torso.rotation.y) *
+      Math.min(1, dt * this.characterConfig.animation.torsoYawFollow);
+
+    const landingCompression =
+      this.elapsed < this.landingRecoverUntil
+        ? (1 - (this.landingRecoverUntil - this.elapsed) / this.characterConfig.animation.landingRecoverSeconds) * 0.12
+        : 0;
+
+    this.avatarParts.torso.position.y =
+      1.2 + Math.sin(this.walkCycle * 2) * this.characterConfig.animation.bobAmplitude * this.moveBlend - landingCompression;
 
     if (this.weaponRig) {
       const aimPitchOffset = this.pitch * 0.25;
-      const sprintOffset = hasMoveInput && this.keys.has("ShiftLeft") ? 0.08 : 0;
-      this.weaponRig.mount.rotation.x = -0.14 + aimPitchOffset + sprintOffset;
-      this.weaponRig.mount.rotation.z = -0.15 + Math.sin(this.walkCycle) * 0.02 * this.moveBlend;
-      this.weaponRig.mount.position.y = 1.36 + Math.sin(this.walkCycle * 2) * 0.015 * this.moveBlend;
+      const sprintOffset = this.locomotionState === "sprint" ? 0.08 : 0;
+      this.weaponRig.mount.rotation.x = -0.14 + aimPitchOffset + sprintOffset - this.fireRecoil * 0.25 - stateWeaponDrop;
+      this.weaponRig.mount.rotation.z =
+        -0.15 +
+        Math.sin(this.walkCycle) * (this.characterConfig.animation.weaponSwayAmplitude + stateWeaponRoll) * this.moveBlend;
+      this.weaponRig.mount.position.y =
+        1.36 +
+        Math.sin(this.walkCycle * 2) *
+          this.characterConfig.animation.weaponBobAmplitude *
+          this.moveBlend -
+        stateWeaponDrop;
+
+      this.weaponRig.mount.position.z = 0.16 - this.aimBlend * 0.05 - (this.locomotionState === "sprint" ? 0.06 : 0);
     }
+  }
+
+  _resolveLocomotionState({ hasMoveInput, canSprint, speedNorm, landed }) {
+    const wasAir = this.locomotionState === "jump" || this.locomotionState === "fall";
+    if (!this.onGround) {
+      return this.velocity.y > 0.25 ? "jump" : "fall";
+    }
+
+    if (landed || (wasAir && this.onGround)) {
+      return "land";
+    }
+
+    if (this.elapsed < this.landingRecoverUntil) {
+      return "land";
+    }
+
+    if (this.isAiming) {
+      return hasMoveInput ? "aim_move" : "aim_idle";
+    }
+
+    if (!hasMoveInput || speedNorm < this.characterConfig.movement.walkSpeedThreshold) return "idle";
+    if (canSprint || speedNorm >= this.characterConfig.movement.sprintSpeedThreshold) return "sprint";
+    if (speedNorm >= this.characterConfig.movement.jogSpeedThreshold) return "jog";
+    return "walk";
+  }
+
+  notifyWeaponFired(intensity = 1, profileName = "default") {
+    const profiles = this.characterConfig.camera.recoilProfiles || {};
+    const profile = profiles[profileName] || profiles.default || { recoil: 0.38, camKick: 1, yawJitter: 1 };
+    this.lastCameraKickProfile = profileName;
+
+    const recoilScale = Math.max(0.05, profile.recoil || 0.38);
+    this.fireRecoil = Math.min(1.4, this.fireRecoil + Math.max(0, Number(intensity) || 0) * recoilScale);
+
+    const kickScale = this.characterConfig.camera.weaponKickScale;
+    const maxKick = this.characterConfig.camera.maxKick;
+    const camKickScale = Math.max(0.05, profile.camKick || 1);
+    const yawJitterScale = Math.max(0.05, profile.yawJitter || 1);
+
+    const pattern = this.recoilPatterns[profileName] || this.recoilPatterns.default;
+    const state = this.recoilPatternState.get(profileName) || { index: 0, lastAt: -999 };
+    if (this.elapsed - state.lastAt > 0.34) {
+      state.index = 0;
+    }
+    const patternPoint = pattern[state.index % pattern.length];
+    this.lastRecoilPatternIndex = state.index % pattern.length;
+    state.index += 1;
+    state.lastAt = this.elapsed;
+    this.recoilPatternState.set(profileName, state);
+
+    const deterministicKickY = intensity * kickScale * camKickScale * (patternPoint.y || 1);
+    const deterministicKickX = kickScale * yawJitterScale * (patternPoint.x || 0);
+    this.cameraKick.vy -= Math.min(maxKick, Math.max(0.004, deterministicKickY));
+    this.cameraKick.vx += deterministicKickX;
   }
 
   _updateCamera(dt) {
@@ -400,7 +569,39 @@ export class PlayerController {
     const right = new THREE.Vector3().crossVectors(forward, up).normalize();
 
     const pivot = this.position.clone().add(new THREE.Vector3(0, cfg.height, 0));
-    const lookTarget = pivot.clone().add(forward.clone().multiplyScalar(36));
+    const swayAmp = this.characterConfig.camera.swayAmplitude;
+    const swayFreq = this.characterConfig.camera.swayFrequency;
+    const gait = Math.min(1, Math.hypot(this.velocity.x, this.velocity.z) / Math.max(0.001, this.sprintSpeed));
+    const moveSwayScale = this.moveBlend * this.moveBlend * gait * (this.isAiming ? 0.14 : 0.34);
+    const targetSwayX = Math.sin(this.walkCycle * swayFreq) * swayAmp * moveSwayScale;
+    const targetSwayY = Math.cos(this.walkCycle * swayFreq * 0.5) * swayAmp * 0.45 * moveSwayScale;
+    const swayLerp = 1 - Math.exp(-10 * dt);
+    this.cameraSway.x += (targetSwayX - this.cameraSway.x) * swayLerp;
+    this.cameraSway.y += (targetSwayY - this.cameraSway.y) * swayLerp;
+
+    const spring = this.characterConfig.camera.springStiffness;
+    const damping =
+      this.characterConfig.camera.springDamping *
+      (this.isAiming ? this.characterConfig.camera.adsDampingMultiplier || 1.25 : 1);
+    this.cameraKick.vx += (-this.cameraKick.x * spring - this.cameraKick.vx * damping) * dt;
+    this.cameraKick.vy += (-this.cameraKick.y * spring - this.cameraKick.vy * damping) * dt;
+    this.cameraKick.x += this.cameraKick.vx * dt;
+    this.cameraKick.y += this.cameraKick.vy * dt;
+
+    this.cameraLandingImpulse = Math.max(
+      0,
+      this.cameraLandingImpulse - dt * this.characterConfig.camera.kickRecovery
+    );
+
+    const camPitchOffset = this.cameraSway.y + this.cameraKick.y - this.cameraLandingImpulse;
+    const camYawOffset = this.cameraSway.x + this.cameraKick.x;
+    const lookForward = new THREE.Vector3(
+      Math.sin(this.yaw + camYawOffset) * Math.cos(this.pitch + camPitchOffset),
+      Math.sin(this.pitch + camPitchOffset),
+      Math.cos(this.yaw + camYawOffset) * Math.cos(this.pitch + camPitchOffset)
+    ).normalize();
+
+    const lookTarget = pivot.clone().add(lookForward.multiplyScalar(36));
 
     const desiredOffset = forward
       .clone()
@@ -454,7 +655,7 @@ export class PlayerController {
     const targetVX = this.moveDir.x * targetSpeed;
     const targetVZ = this.moveDir.z * targetSpeed;
 
-    const accel = this.onGround ? 12 : 4;
+    const accel = this.onGround ? this.characterConfig.movement.accelGround : this.characterConfig.movement.accelAir;
     this.velocity.x += (targetVX - this.velocity.x) * Math.min(1, accel * dt);
     this.velocity.z += (targetVZ - this.velocity.z) * Math.min(1, accel * dt);
     if (!hasMoveInput && this.onGround) {
@@ -496,6 +697,10 @@ export class PlayerController {
       if (!this.onGround) {
         landed = true;
         fallSpeed = Math.max(0, -preClampYVel);
+        this.landingRecoverUntil = this.elapsed + this.characterConfig.animation.landingRecoverSeconds;
+        const landingScale = this.characterConfig.camera.landingImpulseScale;
+        const landingMax = this.characterConfig.camera.landingImpulseMax;
+        this.cameraLandingImpulse = Math.min(landingMax, this.cameraLandingImpulse + fallSpeed * landingScale);
       }
       this.position.y = groundY;
       this.velocity.y = 0;
@@ -512,6 +717,22 @@ export class PlayerController {
     this.position.x = Math.max(-maxWorld, Math.min(maxWorld, this.position.x));
     this.position.z = Math.max(-maxWorld, Math.min(maxWorld, this.position.z));
 
+    const speedNorm = Math.min(1, Math.hypot(this.velocity.x, this.velocity.z) / Math.max(0.001, this.sprintSpeed));
+    const nextLocomotion = this._resolveLocomotionState({
+      hasMoveInput,
+      canSprint,
+      speedNorm,
+      landed,
+    });
+    if (nextLocomotion !== this.locomotionState) {
+      this.previousLocomotionState = this.locomotionState;
+      this.locomotionState = nextLocomotion;
+      this.locomotionStateTime = 0;
+      this.stateBlend = 0;
+    } else {
+      this.locomotionStateTime += dt;
+    }
+
     this._updateVisual(dt, hasMoveInput);
     this._updateCamera(dt);
 
@@ -525,6 +746,16 @@ export class PlayerController {
       sprinting: canSprint,
       hasMoveInput,
       isAiming: this.isAiming,
+      locomotionState: this.locomotionState,
+      previousLocomotionState: this.previousLocomotionState,
+      locomotionStateTime: this.locomotionStateTime,
+      locomotionBlend: this.stateBlend,
+      speedNormalized: speedNorm,
+      cameraKickX: this.cameraKick.x,
+      cameraKickY: this.cameraKick.y,
+      cameraLandingImpulse: this.cameraLandingImpulse,
+      cameraKickProfile: this.lastCameraKickProfile,
+      recoilPatternIndex: this.lastRecoilPatternIndex,
     };
   }
 }

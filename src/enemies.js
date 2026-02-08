@@ -2,6 +2,20 @@ import * as THREE from "https://unpkg.com/three@0.161.0/build/three.module.js";
 import { createTacticalRifleModel } from "./weaponModels.js";
 
 const ENEMY_TYPES = {
+  raiderWhite: {
+    color: 0xe8edf2,
+    emissive: 0x1e232b,
+    speed: 4.5,
+    maxHealth: 34,
+    attackRange: 2.1,
+    attackDamage: 8,
+    attackCooldown: 0.95,
+    detectionRange: 24,
+    rewardScore: 8,
+    rewardXp: 26,
+    respawnDelay: 22,
+    size: 0.8,
+  },
   bruiser: {
     color: 0xc45454,
     emissive: 0x2a1010,
@@ -64,6 +78,23 @@ const ENEMY_TYPES = {
     projectileSpeed: 24,
     projectileColor: 0xd0b8ff,
   },
+  engineer: {
+    color: 0x62b8a4,
+    emissive: 0x103029,
+    speed: 3.9,
+    maxHealth: 30,
+    attackRange: 26,
+    attackDamage: 8,
+    attackCooldown: 1.35,
+    detectionRange: 30,
+    rewardScore: 10,
+    rewardXp: 34,
+    respawnDelay: 24,
+    preferredRange: 14,
+    size: 0.74,
+    projectileSpeed: 20,
+    projectileColor: 0x80ffe0,
+  },
 };
 
 function clamp(value, min, max) {
@@ -86,6 +117,10 @@ export class EnemySystem {
         : null;
     this.worldSize = worldSize;
     this.maxWorld = worldSize * 0.5 - 4;
+    this.getContainmentState =
+      typeof options.getContainmentState === "function"
+        ? options.getContainmentState
+        : null;
     this.enemies = [];
     this.enemyMeshToId = new Map();
     this.projectiles = [];
@@ -228,13 +263,13 @@ export class EnemySystem {
   }
 
   _attachWeaponToEnemy(enemy) {
-    if (enemy.type !== "shooter" && enemy.type !== "sniper") return;
+    if (enemy.type !== "shooter" && enemy.type !== "sniper" && enemy.type !== "engineer") return;
 
     const isSniper = enemy.type === "sniper";
     const weapon = createTacticalRifleModel({
-      color: isSniper ? 0x2f2946 : 0x2a313d,
-      accent: isSniper ? 0x130f1f : 0x121822,
-      scale: isSniper ? 0.7 : 0.64,
+      color: isSniper ? 0x2f2946 : enemy.type === "engineer" ? 0x21483f : 0x2a313d,
+      accent: isSniper ? 0x130f1f : enemy.type === "engineer" ? 0x0f211c : 0x121822,
+      scale: isSniper ? 0.7 : enemy.type === "engineer" ? 0.66 : 0.64,
     });
 
     const mount = new THREE.Group();
@@ -250,6 +285,16 @@ export class EnemySystem {
   }
 
   _randomSpawnPosition() {
+    if (this.getContainmentState) {
+      const c = this.getContainmentState();
+      if (c && Number.isFinite(c.minX) && Number.isFinite(c.maxX) && Number.isFinite(c.minZ) && Number.isFinite(c.maxZ)) {
+        const x = c.minX + Math.random() * Math.max(0.001, c.maxX - c.minX);
+        const z = c.minZ + Math.random() * Math.max(0.001, c.maxZ - c.minZ);
+        const y = this.getHeightAtDetailed(x, z, this.getHeightAt(x, z));
+        return new THREE.Vector3(x, y, z);
+      }
+    }
+
     const x = (Math.random() - 0.5) * (this.worldSize - 24);
     const z = (Math.random() - 0.5) * (this.worldSize - 24);
     const y = this.getHeightAtDetailed(x, z, this.getHeightAt(x, z));
@@ -269,10 +314,12 @@ export class EnemySystem {
 
   _pickSpawnType() {
     const roll = Math.random();
-    if (roll < 0.45) return "bruiser";
-    if (roll < 0.75) return "shooter";
-    if (roll < 0.9) return "charger";
-    return "sniper";
+    if (roll < 0.22) return "raiderWhite";
+    if (roll < 0.52) return "bruiser";
+    if (roll < 0.74) return "shooter";
+    if (roll < 0.88) return "charger";
+    if (roll < 0.96) return "sniper";
+    return "engineer";
   }
 
   spawn(count = 12) {
@@ -349,22 +396,53 @@ export class EnemySystem {
     return { hit: true, killed: false, score: 0, xp: 0, type: enemy.type };
   }
 
-  tryHitFromRay(origin, direction, maxDistance, damage, time) {
+  tryHitFromRay(origin, direction, maxDistance, damage, time, hitRadius = 0) {
     const aliveMeshes = this.enemies.filter((e) => e.alive).map((e) => e.mesh);
     if (aliveMeshes.length === 0) return { hit: false, killed: false, score: 0, xp: 0, type: null };
 
-    this.raycaster.set(origin, direction.clone().normalize());
+    const dir = direction.clone().normalize();
+    this.raycaster.set(origin, dir);
     this.raycaster.far = maxDistance;
     const hits = this.raycaster.intersectObjects(aliveMeshes, true);
-    if (hits.length === 0) return { hit: false, killed: false, score: 0, xp: 0, type: null };
+    if (hits.length > 0) {
+      const hitEnemyId = this.enemyMeshToId.get(hits[0].object.uuid);
+      if (hitEnemyId) {
+        const enemy = this._getEnemyById(hitEnemyId);
+        if (enemy) {
+          return this._applyDamage(enemy, damage, time);
+        }
+      }
+    }
 
-    const hitEnemyId = this.enemyMeshToId.get(hits[0].object.uuid);
-    if (!hitEnemyId) return { hit: false, killed: false, score: 0, xp: 0, type: null };
+    if (hitRadius > 0) {
+      let best = null;
+      let bestT = Infinity;
+      const pointOnRay = new THREE.Vector3();
 
-    const enemy = this._getEnemyById(hitEnemyId);
-    if (!enemy) return { hit: false, killed: false, score: 0, xp: 0, type: null };
+      for (const enemy of this.enemies) {
+        if (!enemy.alive) continue;
 
-    return this._applyDamage(enemy, damage, time);
+        const toEnemy = enemy.mesh.position.clone().sub(origin);
+        const t = toEnemy.dot(dir);
+        if (t < 0 || t > maxDistance) continue;
+
+        pointOnRay.copy(origin).addScaledVector(dir, t);
+        const cfg = ENEMY_TYPES[enemy.type] || ENEMY_TYPES.bruiser;
+        const bodyRadius = hitRadius + 0.45 + (cfg.size || 0.8) * 0.35;
+        const dist = pointOnRay.distanceTo(enemy.mesh.position);
+
+        if (dist <= bodyRadius && t < bestT) {
+          best = enemy;
+          bestT = t;
+        }
+      }
+
+      if (best) {
+        return this._applyDamage(best, damage, time);
+      }
+    }
+
+    return { hit: false, killed: false, score: 0, xp: 0, type: null };
   }
 
   tryHitFromMelee(origin, direction, maxDistance, damage, time, coneDot = 0.45) {
@@ -390,6 +468,34 @@ export class EnemySystem {
     return this._applyDamage(closest, damage, time);
   }
 
+  applyAreaDamage(origin, direction, maxDistance, coneDot, damage, time, maxHits = Infinity) {
+    const dir = direction.clone().normalize();
+    const kills = [];
+    let hitCount = 0;
+
+    for (const enemy of this.enemies) {
+      if (!enemy.alive) continue;
+      if (hitCount >= maxHits) break;
+
+      const toEnemy = enemy.mesh.position.clone().sub(origin);
+      const dist = toEnemy.length();
+      if (dist > maxDistance || dist < 0.0001) continue;
+
+      const dot = toEnemy.normalize().dot(dir);
+      if (dot < coneDot) continue;
+
+      const result = this._applyDamage(enemy, damage, time);
+      if (result.hit) hitCount += 1;
+      if (result.killed) kills.push(result);
+    }
+
+    return {
+      hit: hitCount > 0,
+      hitCount,
+      kills,
+    };
+  }
+
   _updateEnemyVisual(enemy, time) {
     const intensity = time < enemy.hitFlashUntil ? 1.45 : 1;
     for (const mat of enemy.visualMaterials || []) {
@@ -409,7 +515,7 @@ export class EnemySystem {
     const kneeBendL = Math.max(0, Math.sin(enemy.walkCycle + Math.PI * 0.5)) * 0.38 * enemy.moveBlend;
     const kneeBendR = Math.max(0, Math.sin(enemy.walkCycle + Math.PI * 1.5)) * 0.38 * enemy.moveBlend;
 
-    const isRanged = enemy.type === "shooter" || enemy.type === "sniper";
+    const isRanged = enemy.type === "shooter" || enemy.type === "sniper" || enemy.type === "engineer";
     const armSwing = swing * (isRanged ? 0.2 : 1);
     const punchT = enemy.punchActive
       ? clamp((enemy.punchHitAt > 0 ? (enemy.punchHitAt - 0.18) : 0), 0, 9999)
@@ -452,6 +558,14 @@ export class EnemySystem {
     enemy.mesh.position.addScaledVector(move, dt);
     enemy.mesh.position.x = clamp(enemy.mesh.position.x, -this.maxWorld, this.maxWorld);
     enemy.mesh.position.z = clamp(enemy.mesh.position.z, -this.maxWorld, this.maxWorld);
+
+    if (this.getContainmentState) {
+      const c = this.getContainmentState();
+      if (c && !c.gateOpen) {
+        enemy.mesh.position.x = clamp(enemy.mesh.position.x, c.minX, c.maxX);
+        enemy.mesh.position.z = clamp(enemy.mesh.position.z, c.minZ, c.maxZ);
+      }
+    }
 
     if (this.resolveHorizontalCollision) {
       this.resolveHorizontalCollision(
@@ -698,7 +812,7 @@ export class EnemySystem {
       enemy.state = "chase";
       enemy.aggroUntil = Math.max(enemy.aggroUntil, elapsed + 1.25);
 
-      if (enemy.type === "bruiser") {
+      if (enemy.type === "bruiser" || enemy.type === "raiderWhite") {
         this._updateBruiser(enemy, cfg, dist, toPlayer, dt, elapsed, result);
       } else if (enemy.type === "charger") {
         this._updateCharger(enemy, cfg, dist, toPlayer, dt, elapsed, result);

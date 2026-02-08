@@ -2,6 +2,8 @@ const MISSION_TYPES = {
   COLLECT: "collect",
   ELIMINATE: "eliminate",
   SURVIVE: "survive",
+  CRAFT: "craft",
+  DRIFT: "drift",
 };
 
 const MISSION_TEMPLATES = [
@@ -47,6 +49,34 @@ const MISSION_TEMPLATES = [
     baseXp: 52,
     xpPerTier: 18,
   },
+  {
+    id: "craft_supplies",
+    title: "Field Logistics",
+    type: MISSION_TYPES.CRAFT,
+    baseTarget: 1,
+    targetPerTier: 1,
+    baseTime: 40,
+    minTime: 24,
+    timeStep: 1,
+    baseScore: 16,
+    scorePerTier: 7,
+    baseXp: 48,
+    xpPerTier: 16,
+  },
+  {
+    id: "drift_run",
+    title: "Drift Run",
+    type: MISSION_TYPES.DRIFT,
+    baseTarget: 90,
+    targetPerTier: 35,
+    baseTime: 40,
+    minTime: 24,
+    timeStep: 1,
+    baseScore: 20,
+    scorePerTier: 9,
+    baseXp: 56,
+    xpPerTier: 20,
+  },
 ];
 
 function clamp(value, min, max) {
@@ -89,6 +119,14 @@ export class MissionSystem {
       return `${m.title}: Survive ${timer}`;
     }
 
+    if (m.type === MISSION_TYPES.CRAFT) {
+      return `${m.title}: Craft ${m.target} supplies in ${timer} (${m.progress}/${m.target})`;
+    }
+
+    if (m.type === MISSION_TYPES.DRIFT) {
+      return `${m.title}: Bank ${m.target} drift in ${timer} (${m.progress}/${m.target})`;
+    }
+
     const action = m.type === MISSION_TYPES.COLLECT ? "Collect" : "Eliminate";
     const noun = m.type === MISSION_TYPES.COLLECT ? "crystals" : "enemies";
     return `${m.title}: ${action} ${m.target} ${noun} in ${timer} (${m.progress}/${m.target})`;
@@ -113,6 +151,10 @@ export class MissionSystem {
       m.progress = clamp(m.progress + numberOr(payload.count, 1), 0, m.target);
     } else if (m.type === MISSION_TYPES.ELIMINATE && eventName === "enemy_killed") {
       m.progress = clamp(m.progress + numberOr(payload.count, 1), 0, m.target);
+    } else if (m.type === MISSION_TYPES.CRAFT && eventName === "crafted_consumable") {
+      m.progress = clamp(m.progress + numberOr(payload.count, 1), 0, m.target);
+    } else if (m.type === MISSION_TYPES.DRIFT && eventName === "drift_bank_scored") {
+      m.progress = clamp(m.progress + numberOr(payload.score, 0), 0, m.target);
     }
   }
 

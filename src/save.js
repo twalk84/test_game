@@ -1,8 +1,17 @@
+import { GAME_CONFIG } from "./config.js";
+
 const SAVE_KEY = "open_world_mvp_save_v2";
 const LEGACY_SAVE_KEY = "open_world_mvp_save_v1";
 
 export function saveGame(data) {
-  localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+  const payload = {
+    ...data,
+    meta: {
+      version: GAME_CONFIG.save.version,
+      savedAt: Date.now(),
+    },
+  };
+  localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
 }
 
 export function loadGame() {

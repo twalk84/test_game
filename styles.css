@@ -16,14 +16,25 @@ html, body {
 }
 
 #crosshair {
+  --spread: 6px;
   position: fixed;
   left: 50%;
   top: 50%;
-  width: 22px;
-  height: 22px;
+  width: 30px;
+  height: 30px;
   transform: translate(-50%, -50%);
   pointer-events: none;
   z-index: 9;
+}
+
+#damageOverlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 8;
+  opacity: 0;
+  background: radial-gradient(circle at center, rgba(255, 0, 0, 0.02) 0%, rgba(180, 0, 0, 0.2) 65%, rgba(120, 0, 0, 0.45) 100%);
+  transition: opacity 120ms linear;
 }
 
 .crosshair-line {
@@ -32,18 +43,47 @@ html, body {
   top: 50%;
   background: rgba(255, 255, 255, 0.92);
   box-shadow: 0 0 4px rgba(0, 0, 0, 0.85);
+  border-radius: 1px;
 }
 
-.crosshair-line.horizontal {
-  width: 14px;
+.crosshair-line.left,
+.crosshair-line.right {
+  width: 8px;
   height: 2px;
-  transform: translate(-50%, -50%);
 }
 
-.crosshair-line.vertical {
+.crosshair-line.top,
+.crosshair-line.bottom {
   width: 2px;
-  height: 14px;
+  height: 8px;
+}
+
+.crosshair-line.left {
+  transform: translate(calc(-50% - var(--spread)), -50%);
+}
+
+.crosshair-line.right {
+  transform: translate(calc(-50% + var(--spread)), -50%);
+}
+
+.crosshair-line.top {
+  transform: translate(-50%, calc(-50% - var(--spread)));
+}
+
+.crosshair-line.bottom {
+  transform: translate(-50%, calc(-50% + var(--spread)));
+}
+
+.crosshair-dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
   transform: translate(-50%, -50%);
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.85);
 }
 
 #hud {
@@ -73,7 +113,8 @@ html, body {
 }
 
 #healthBar,
-#staminaBar {
+#staminaBar,
+#weaponHeatBar {
   height: 100%;
   width: 100%;
   transition: width 120ms linear;
@@ -87,6 +128,10 @@ html, body {
   background: linear-gradient(90deg, #22c55e, #84cc16);
 }
 
+#weaponHeatBar {
+  background: linear-gradient(90deg, #f59e0b, #ef4444);
+}
+
 .hint {
   font-size: 12px;
   opacity: 0.85;
@@ -96,6 +141,59 @@ html, body {
   margin-top: 8px;
   color: #93c5fd;
   min-height: 1em;
+}
+
+.interaction {
+  color: #fcd34d;
+  min-height: 1em;
+}
+
+.status-feed {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 84px;
+  overflow: hidden;
+}
+
+.status-feed-item {
+  font-size: 11px;
+  opacity: 0.88;
+  color: #dbeafe;
+}
+
+.status-feed-item.good {
+  color: #86efac;
+}
+
+.status-feed-item.warn {
+  color: #fde68a;
+}
+
+.status-feed-item.danger {
+  color: #fca5a5;
+}
+
+body.sniper-scope #crosshair {
+  width: 24px;
+  height: 24px;
+}
+
+body.sniper-scope #crosshair {
+  --spread: 3px;
+}
+
+body.sniper-scope .crosshair-line.left,
+body.sniper-scope .crosshair-line.right,
+body.sniper-scope .crosshair-line.top,
+body.sniper-scope .crosshair-line.bottom {
+  opacity: 0.9;
+}
+
+body.sniper-scope .crosshair-dot {
+  width: 1px;
+  height: 1px;
 }
 
 .panel {
@@ -134,4 +232,26 @@ html, body {
 
 .hidden {
   display: none;
+}
+
+.debug-panel {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  z-index: 12;
+  min-width: 300px;
+  max-width: 460px;
+  background: rgba(0, 0, 0, 0.68);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  padding: 8px 10px;
+  backdrop-filter: blur(3px);
+}
+
+.debug-panel pre {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #bbf7d0;
 }

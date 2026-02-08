@@ -12,6 +12,11 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+function numberOr(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 function horizontalPushFromAabb(x, z, radius, box) {
   const closestX = clamp(x, box.minX, box.maxX);
   const closestZ = clamp(z, box.minZ, box.maxZ);
@@ -49,15 +54,35 @@ export function createWorld(scene) {
   const dynamicBlockingVolumes = [];
   const walkableSurfaces = [];
 
-  const hazardZones = [
-    { x: -38, z: 34, radius: 10, dps: 7 },
-    { x: 45, z: -22, radius: 12, dps: 8 },
-    { x: 6, z: 48, radius: 8, dps: 9 },
-  ];
+  const hazardZones = [];
+
+  const road = {
+    centerX: 0,
+    centerZ: 10,
+    width: 12,
+    length: 90,
+  };
+
+  const enemyPen = {
+    centerX: 34,
+    centerZ: -26,
+    width: 26,
+    depth: 20,
+    fenceHeight: 2.7,
+    fenceThickness: 0.35,
+    gateWidth: 4.8,
+  };
+
+  const enemyGateState = {
+    isOpen: false,
+    openAmount: 0,
+    targetOpenAmount: 0,
+    maxSlide: enemyPen.gateWidth,
+  };
 
   const mansion = {
-    x: -24,
-    z: -12,
+    x: 5000,
+    z: 5000,
     width: 34,
     depth: 24,
     floors: 3,
@@ -74,11 +99,26 @@ export function createWorld(scene) {
   };
 
   const civilians = [];
+  const burnableTrees = [];
 
   function isNearHouseFootprint(x, z, padding = 0) {
     return (
       Math.abs(x - mansion.x) < mansion.width * 0.5 + padding &&
       Math.abs(z - mansion.z) < mansion.depth * 0.5 + padding
+    );
+  }
+
+  function isNearRoad(x, z, padding = 0) {
+    return (
+      Math.abs(x - road.centerX) < road.width * 0.5 + padding &&
+      Math.abs(z - road.centerZ) < road.length * 0.5 + padding
+    );
+  }
+
+  function isNearEnemyPen(x, z, padding = 0) {
+    return (
+      Math.abs(x - enemyPen.centerX) < enemyPen.width * 0.5 + padding &&
+      Math.abs(z - enemyPen.centerZ) < enemyPen.depth * 0.5 + padding
     );
   }
 
@@ -150,6 +190,93 @@ export function createWorld(scene) {
 
   scene.fog = new THREE.Fog(0x7aa4d6, 40, 260);
 
+  const roadOverlayGeo = new THREE.PlaneGeometry(road.width, road.length, 24, 120);
+  roadOverlayGeo.rotateX(-Math.PI / 2);
+  const roadPos = roadOverlayGeo.attributes.position;
+  for (let i = 0; i < roadPos.count; i++) {
+    const localX = roadPos.getX(i);
+    const localZ = roadPos.getZ(i);
+    const worldX = road.centerX + localX;
+    const worldZ = road.centerZ + localZ;
+    roadPos.setY(i, terrainHeight(worldX, worldZ) + 0.045);
+  }
+  roadOverlayGeo.computeVertexNormals();
+  const roadOverlay = new THREE.Mesh(
+    roadOverlayGeo,
+    new THREE.MeshStandardMaterial({ color: 0x3f4349, roughness: 0.92, metalness: 0.03 })
+  );
+  roadOverlay.position.set(road.centerX, 0, road.centerZ);
+  roadOverlay.receiveShadow = true;
+  roadOverlay.castShadow = false;
+  scene.add(roadOverlay);
+
+  function buildEnemyPen() {
+    const fenceMat = new THREE.MeshStandardMaterial({ color: 0x8e949b, roughness: 0.86, metalness: 0.22 });
+    const gateMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.7, metalness: 0.35 });
+    const halfW = enemyPen.width * 0.5;
+    const halfD = enemyPen.depth * 0.5;
+    const h = enemyPen.fenceHeight;
+    const t = enemyPen.fenceThickness;
+    const baseY = terrainHeight(enemyPen.centerX, enemyPen.centerZ);
+    const yMid = baseY + h * 0.5;
+
+    const north = new THREE.Mesh(new THREE.BoxGeometry(enemyPen.width, h, t), fenceMat);
+    north.position.set(enemyPen.centerX, yMid, enemyPen.centerZ - halfD);
+    const west = new THREE.Mesh(new THREE.BoxGeometry(t, h, enemyPen.depth), fenceMat);
+    west.position.set(enemyPen.centerX - halfW, yMid, enemyPen.centerZ);
+    const east = new THREE.Mesh(new THREE.BoxGeometry(t, h, enemyPen.depth), fenceMat);
+    east.position.set(enemyPen.centerX + halfW, yMid, enemyPen.centerZ);
+
+    const southSegmentW = (enemyPen.width - enemyPen.gateWidth) * 0.5;
+    const southLeft = new THREE.Mesh(new THREE.BoxGeometry(southSegmentW, h, t), fenceMat);
+    southLeft.position.set(
+      enemyPen.centerX - enemyPen.gateWidth * 0.5 - southSegmentW * 0.5,
+      yMid,
+      enemyPen.centerZ + halfD
+    );
+    const southRight = new THREE.Mesh(new THREE.BoxGeometry(southSegmentW, h, t), fenceMat);
+    southRight.position.set(
+      enemyPen.centerX + enemyPen.gateWidth * 0.5 + southSegmentW * 0.5,
+      yMid,
+      enemyPen.centerZ + halfD
+    );
+
+    for (const piece of [north, west, east, southLeft, southRight]) {
+      piece.castShadow = true;
+      piece.receiveShadow = true;
+      scene.add(piece);
+      cameraCollisionMeshes.push(piece);
+      addBlockingMesh(piece, piece.geometry.parameters);
+    }
+
+    const gateRoot = new THREE.Group();
+    gateRoot.position.set(enemyPen.centerX, baseY, enemyPen.centerZ + halfD - t * 0.5);
+    const gate = new THREE.Mesh(new THREE.BoxGeometry(enemyPen.gateWidth, h, t * 0.95), gateMat);
+    gate.position.set(0, h * 0.5, 0);
+    gate.castShadow = true;
+    gate.receiveShadow = true;
+    gateRoot.add(gate);
+    scene.add(gateRoot);
+    cameraCollisionMeshes.push(gate);
+
+    enemyPen.gateRoot = gateRoot;
+    enemyPen.gateMesh = gate;
+    enemyPen.baseY = baseY;
+
+    addDynamicBlockingVolume(
+      () => ({
+        minX: enemyPen.centerX - enemyPen.gateWidth * 0.5,
+        maxX: enemyPen.centerX + enemyPen.gateWidth * 0.5,
+        minY: baseY,
+        maxY: baseY + h,
+        minZ: enemyPen.centerZ + halfD - t,
+        maxZ: enemyPen.centerZ + halfD + t,
+      }),
+      () => enemyGateState.openAmount < 0.92
+    );
+  }
+  buildEnemyPen();
+
   const groundGeo = new THREE.PlaneGeometry(worldSize, worldSize, segments, segments);
   groundGeo.rotateX(-Math.PI / 2);
   const pos = groundGeo.attributes.position;
@@ -202,7 +329,7 @@ export function createWorld(scene) {
     leafTop.castShadow = true;
     leafTip.castShadow = true;
 
-    const scale = 0.82 + Math.random() * 0.62;
+    const scale = 0.56 + Math.random() * 0.22;
     trunk.scale.setScalar(scale);
     leafBottom.scale.setScalar(scale);
     leafMid.scale.setScalar(scale);
@@ -213,12 +340,23 @@ export function createWorld(scene) {
     cameraCollisionMeshes.push(trunk, leafBottom, leafMid, leafTop, leafTip);
 
     addBlockingMesh(trunk, { x: 1.1 * scale, y: 3.1 * scale, z: 1.1 * scale });
+
+    burnableTrees.push({
+      id: `tree_${burnableTrees.length}`,
+      trunk,
+      leaves: [leafBottom, leafMid, leafTop, leafTip],
+      canBurn: Math.random() < 0.38,
+      burned: false,
+      burnTimeLeft: 0,
+      burnDuration: 5 + Math.random() * 2,
+      tickAccum: 0,
+    });
   }
 
   function createCivilianModel() {
     const root = new THREE.Group();
-    const shirtMat = new THREE.MeshStandardMaterial({ color: 0xf0f0f0, roughness: 0.8, metalness: 0.02 });
-    const pantsMat = new THREE.MeshStandardMaterial({ color: 0xdddddd, roughness: 0.85, metalness: 0.01 });
+    const shirtMat = new THREE.MeshStandardMaterial({ color: 0x95b39a, roughness: 0.8, metalness: 0.02 });
+    const pantsMat = new THREE.MeshStandardMaterial({ color: 0x6c7f86, roughness: 0.85, metalness: 0.01 });
     const skinMat = new THREE.MeshStandardMaterial({ color: 0xf0c8a2, roughness: 0.9, metalness: 0 });
 
     const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.3, 0.8, 6, 10), shirtMat);
@@ -288,24 +426,31 @@ export function createWorld(scene) {
     };
   }
 
-  for (let i = 0; i < 360; i++) {
-    const x = (Math.random() - 0.5) * (worldSize - 20);
-    const z = (Math.random() - 0.5) * (worldSize - 20);
-    const y = terrainHeight(x, z);
-    if (isNearHouseFootprint(x, z, 8)) continue;
+  const forestStep = 9.6;
+  for (let gx = -worldRadius + 10; gx <= worldRadius - 10; gx += forestStep) {
+    for (let gz = -worldRadius + 10; gz <= worldRadius - 10; gz += forestStep) {
+      const x = gx + (Math.random() - 0.5) * 3.1;
+      const z = gz + (Math.random() - 0.5) * 3.1;
+      const y = terrainHeight(x, z);
+      if (isNearHouseFootprint(x, z, 8)) continue;
+      if (isNearRoad(x, z, 3.9)) continue;
+      if (isNearEnemyPen(x, z, 3)) continue;
 
-    if (Math.random() < 0.12) {
-      const rock = new THREE.Mesh(rockGeo, rockMat);
-      rock.position.set(x, y + 0.8, z);
-      const scale = 0.7 + Math.random() * 1.2;
-      rock.scale.setScalar(scale);
-      rock.castShadow = true;
-      rock.receiveShadow = true;
-      scene.add(rock);
-      cameraCollisionMeshes.push(rock);
-      addBlockingMesh(rock, { x: 1.8 * scale, y: 1.8 * scale, z: 1.8 * scale });
-    } else {
-      createLayeredPineTree(x, z, y);
+      const forestNoise = Math.sin(x * 0.075) + Math.cos(z * 0.068);
+      const spawnRock = forestNoise > 1.15 && Math.random() < 0.28;
+      if (spawnRock) {
+        const rock = new THREE.Mesh(rockGeo, rockMat);
+        rock.position.set(x, y + 0.65, z);
+        const scale = 0.78 + Math.random() * 0.36;
+        rock.scale.setScalar(scale);
+        rock.castShadow = true;
+        rock.receiveShadow = true;
+        scene.add(rock);
+        cameraCollisionMeshes.push(rock);
+        addBlockingMesh(rock, { x: 1.6 * scale, y: 1.6 * scale, z: 1.6 * scale });
+      } else {
+        createLayeredPineTree(x, z, y);
+      }
     }
   }
 
@@ -433,7 +578,7 @@ export function createWorld(scene) {
   const doorThickness = 0.12;
   const singleDoorWidth = mansion.doorWidth * 0.5;
   const doorY = groundSurfaceY + doorHeight * 0.5;
-  const doorZ = mansion.z + halfD - mansion.wallThickness * 0.5 - 0.07;
+  const doorZ = mansion.z + halfD - mansion.wallThickness * 0.5;
 
   const leftDoorPivot = new THREE.Group();
   leftDoorPivot.position.set(mansion.x - singleDoorWidth * 0.5, doorY, doorZ);
@@ -457,10 +602,10 @@ export function createWorld(scene) {
 
   function addFrontEntryPath() {
     const stepMat = new THREE.MeshStandardMaterial({ color: 0xb7ab98, roughness: 0.9, metalness: 0.02 });
-    const frontZ = mansion.z + halfD + 0.95;
+    const frontZ = mansion.z + halfD + 0.7;
 
-    const topLanding = new THREE.Mesh(new THREE.BoxGeometry(5.6, 0.24, 2.1), stepMat);
-    topLanding.position.set(mansion.x, groundSurfaceY - 0.12, frontZ + 0.15);
+    const topLanding = new THREE.Mesh(new THREE.BoxGeometry(5.8, 0.12, 2.35), stepMat);
+    topLanding.position.set(mansion.x, groundSurfaceY - 0.06, frontZ + 0.1);
     topLanding.castShadow = true;
     topLanding.receiveShadow = true;
     mansionGroup.add(topLanding);
@@ -468,13 +613,13 @@ export function createWorld(scene) {
     addFlatWalkable(
       mansion.x - 2.8,
       mansion.x + 2.8,
-      frontZ - 0.9,
-      frontZ + 1.2,
+      frontZ - 1.1,
+      frontZ + 1.25,
       groundSurfaceY
     );
 
     const stepCount = 4;
-    const runStart = frontZ + 1.2;
+    const runStart = frontZ + 1.25;
     const runEnd = frontZ + 4.4;
     const bottomY = baseY + 0.9;
     for (let i = 0; i < stepCount; i++) {
@@ -506,12 +651,12 @@ export function createWorld(scene) {
     () => ({
       minX: mansion.x - mansion.doorWidth * 0.5,
       maxX: mansion.x + mansion.doorWidth * 0.5,
-      minY: groundSurfaceY,
+      minY: groundSurfaceY - 0.15,
       maxY: groundSurfaceY + doorHeight,
       minZ: doorZ - doorThickness * 0.7,
       maxZ: doorZ + doorThickness * 0.7,
     }),
-    () => doorState.openAmount < 0.2
+    () => doorState.openAmount < 0.08
   );
 
   function addInteriorWalls() {
@@ -741,8 +886,14 @@ export function createWorld(scene) {
       c.root.scale.setScalar(0.95 + Math.random() * 0.12);
       scene.add(c.root);
       civilians.push({
+        id: `civilian_${civilians.length}`,
         mesh: c.root,
         parts: c.parts,
+        alive: true,
+        hp: 26,
+        burning: false,
+        burnTimeLeft: 0,
+        burnTickAccum: 0,
         dir: new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize(),
         speed: 1.2 + Math.random() * 0.5,
         walkCycle: Math.random() * Math.PI * 2,
@@ -754,6 +905,28 @@ export function createWorld(scene) {
 
   function updateCivilians(dt) {
     for (const c of civilians) {
+      if (!c.alive) {
+        c.mesh.visible = false;
+        continue;
+      }
+
+      if (c.burning) {
+        c.burnTimeLeft -= dt;
+        c.burnTickAccum += dt;
+        while (c.burnTickAccum >= 0.2) {
+          c.hp = Math.max(0, c.hp - 1.6);
+          c.burnTickAccum -= 0.2;
+        }
+        if (c.burnTimeLeft <= 0) {
+          c.burning = false;
+        }
+        if (c.hp <= 0) {
+          c.alive = false;
+          c.mesh.visible = false;
+          continue;
+        }
+      }
+
       c.timer -= dt;
       if (c.timer <= 0) {
         c.timer = 1.8 + Math.random() * 3.8;
@@ -802,6 +975,117 @@ export function createWorld(scene) {
     }
   }
 
+  function applyFireToCivilians(origin, radius = 4.2, dps = 18, dt = 0.1) {
+    let affected = 0;
+    let killed = 0;
+    for (const c of civilians) {
+      if (!c.alive) continue;
+      const dist = c.mesh.position.distanceTo(origin);
+      if (dist > radius) continue;
+      const factor = 1 - dist / radius;
+      c.hp = Math.max(0, c.hp - dps * (0.4 + factor * 0.6) * dt);
+      c.burning = true;
+      c.burnTimeLeft = Math.max(c.burnTimeLeft, 1.2 + factor * 1.8);
+      affected += 1;
+      if (c.hp <= 0) {
+        c.alive = false;
+        c.mesh.visible = false;
+        killed += 1;
+      }
+    }
+    return { affected, killed };
+  }
+
+  function igniteTreesInRadius(origin, radius = 1.6) {
+    let closest = null;
+    let closestDist = Infinity;
+
+    for (const tree of burnableTrees) {
+      if (!tree.canBurn) continue;
+      if (tree.burned) continue;
+      const dist = tree.trunk.position.distanceTo(origin);
+      if (dist > radius) continue;
+      if (dist < closestDist) {
+        closest = tree;
+        closestDist = dist;
+      }
+    }
+
+    if (!closest) return { ignited: 0 };
+    closest.burned = true;
+    closest.burnTimeLeft = closest.burnDuration;
+    return { ignited: 1 };
+  }
+
+  function updateTrees(dt) {
+    for (const tree of burnableTrees) {
+      if (!tree.burned) continue;
+      tree.burnTimeLeft -= dt;
+      tree.tickAccum += dt;
+      const progress = clamp(1 - tree.burnTimeLeft / Math.max(0.01, tree.burnDuration), 0, 1);
+      tree.trunk.material.color.lerp(new THREE.Color(0x1a1a1a), progress * 0.25);
+      tree.trunk.material.emissive = tree.trunk.material.emissive || new THREE.Color(0x000000);
+      tree.trunk.material.emissive.setRGB(0.2 * (1 - progress), 0.08 * (1 - progress), 0);
+      for (const leaf of tree.leaves) {
+        leaf.material.color.lerp(new THREE.Color(0x232323), progress * 0.2);
+        leaf.material.emissive = leaf.material.emissive || new THREE.Color(0x000000);
+        leaf.material.emissive.setRGB(0.35 * (1 - progress), 0.15 * (1 - progress), 0.02);
+      }
+      if (tree.burnTimeLeft <= 0) {
+        tree.burnTimeLeft = 0;
+        for (const leaf of tree.leaves) {
+          leaf.visible = false;
+        }
+        tree.trunk.material.color.set(0x1d1d1d);
+        tree.trunk.material.emissive.set(0x000000);
+      }
+    }
+  }
+
+  function getDynamicState() {
+    return {
+      trees: burnableTrees.map((tree) => ({
+        id: tree.id,
+        canBurn: tree.canBurn,
+        burned: tree.burned,
+        burnTimeLeft: tree.burnTimeLeft,
+      })),
+      civilians: civilians.map((c) => ({
+        id: c.id,
+        alive: c.alive,
+        hp: c.hp,
+      })),
+    };
+  }
+
+  function applyDynamicState(saved = null) {
+    if (!saved) return;
+
+    const treeMap = new Map(Array.isArray(saved.trees) ? saved.trees.map((t) => [t.id, t]) : []);
+    for (const tree of burnableTrees) {
+      const match = treeMap.get(tree.id);
+      if (!match) continue;
+      if (typeof match.canBurn === "boolean") {
+        tree.canBurn = match.canBurn;
+      }
+      tree.burned = Boolean(match.burned);
+      tree.burnTimeLeft = Math.max(0, numberOr(match.burnTimeLeft, 0));
+      if (tree.burned && tree.burnTimeLeft <= 0) {
+        for (const leaf of tree.leaves) leaf.visible = false;
+        tree.trunk.material.color.set(0x1d1d1d);
+      }
+    }
+
+    const civMap = new Map(Array.isArray(saved.civilians) ? saved.civilians.map((c) => [c.id, c]) : []);
+    for (const c of civilians) {
+      const match = civMap.get(c.id);
+      if (!match) continue;
+      c.alive = Boolean(match.alive);
+      c.hp = Math.max(0, numberOr(match.hp, c.hp));
+      c.mesh.visible = c.alive;
+    }
+  }
+
   function updateDoors(dt) {
     const speed = 3.8;
     doorState.openAmount += (doorState.targetOpenAmount - doorState.openAmount) * Math.min(1, dt * speed);
@@ -810,18 +1094,53 @@ export function createWorld(scene) {
     const angle = doorState.maxOpenAngle * doorState.openAmount;
     leftDoorPivot.rotation.y = -angle;
     rightDoorPivot.rotation.y = angle;
+
+    enemyGateState.openAmount +=
+      (enemyGateState.targetOpenAmount - enemyGateState.openAmount) * Math.min(1, dt * 4.2);
+    enemyGateState.isOpen = enemyGateState.openAmount > 0.9;
+    if (enemyPen.gateRoot) {
+      enemyPen.gateRoot.position.x = enemyPen.centerX + enemyGateState.maxSlide * enemyGateState.openAmount;
+    }
   }
 
   function toggleNearestDoor(playerPos, range = 5.8) {
+    const penDist = Math.hypot(
+      playerPos.x - enemyPen.centerX,
+      playerPos.z - (enemyPen.centerZ + enemyPen.depth * 0.5)
+    );
+    if (penDist <= range) {
+      enemyGateState.targetOpenAmount = enemyGateState.targetOpenAmount > 0.5 ? 0 : 1;
+      return {
+        changed: true,
+        open: enemyGateState.targetOpenAmount > 0.5,
+        message: enemyGateState.targetOpenAmount > 0.5 ? "Enemy pen gate opened." : "Enemy pen gate closed.",
+      };
+    }
+
     const d = Math.hypot(playerPos.x - mansion.x, playerPos.z - (mansion.z + halfD));
     if (d > range) {
-      return { changed: false, open: doorState.isOpen, message: "Move closer to the front door." };
+      return { changed: false, open: doorState.isOpen, message: "Move closer to a gate or door." };
     }
     doorState.targetOpenAmount = doorState.targetOpenAmount > 0.5 ? 0 : 1;
     return {
       changed: true,
       open: doorState.targetOpenAmount > 0.5,
       message: doorState.targetOpenAmount > 0.5 ? "Door opened." : "Door closed.",
+    };
+  }
+
+  function getEnemyContainmentState() {
+    return {
+      gateOpen: enemyGateState.isOpen,
+      centerX: enemyPen.centerX,
+      centerZ: enemyPen.centerZ,
+      width: enemyPen.width,
+      depth: enemyPen.depth,
+      minX: enemyPen.centerX - enemyPen.width * 0.5 + 0.8,
+      maxX: enemyPen.centerX + enemyPen.width * 0.5 - 0.8,
+      minZ: enemyPen.centerZ - enemyPen.depth * 0.5 + 0.8,
+      maxZ: enemyPen.centerZ + enemyPen.depth * 0.5 - 0.8,
+      spawnY: terrainHeight(enemyPen.centerX, enemyPen.centerZ),
     };
   }
 
@@ -945,19 +1264,13 @@ export function createWorld(scene) {
   }
 
   function getHazardDamageAt(x, z, dt) {
-    let damage = 0;
-    for (const zone of hazardZones) {
-      const dx = x - zone.x;
-      const dz = z - zone.z;
-      const dist = Math.hypot(dx, dz);
-      if (dist < zone.radius) {
-        const edgeFactor = 1 - dist / zone.radius;
-        damage += zone.dps * (0.45 + edgeFactor * 0.55) * dt;
-      }
-    }
-    const y = terrainHeight(x, z);
-    if (y < -1.6) damage += 6 * dt;
-    return damage;
+    return 0;
+  }
+
+  function getSurfaceGripAt(x, z) {
+    if (isNearRoad(x, z, 0.9)) return 1;
+    if (isInsideMansionXZ(x, z, 1.2)) return 0.95;
+    return 0.82;
   }
 
   function getDayNightState(elapsedTime) {
@@ -1015,6 +1328,7 @@ export function createWorld(scene) {
     getHeightAtDetailed,
     resolveHorizontalCollision,
     getHazardDamageAt,
+    getSurfaceGripAt,
     getDayNightState,
     updateDayNight,
     updateDoors,
@@ -1022,5 +1336,11 @@ export function createWorld(scene) {
     getCameraTuningForPosition,
     constrainCameraPosition,
     updateCivilians,
+    applyFireToCivilians,
+    igniteTreesInRadius,
+    updateTrees,
+    getDynamicState,
+    applyDynamicState,
+    getEnemyContainmentState,
   };
 }
